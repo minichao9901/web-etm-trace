@@ -70,4 +70,14 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(self.store.navigate(3,start=2,end=3)['seq'])
         self.assertEqual(self.store.navigate(3,pc=0x200,start=2,end=4)['seq'],2)
         self.assertEqual(self.store.window(5,6)['analysis']['functions'][0]['unknownExecution'],2)
+    def test_function_timeline_aggregates_dense_markers_across_the_whole_range(self):
+        self.data['events']=[dict(seq=i,kind='event',type=9 if i%2 else 1,text='marker') for i in range(6001)]
+        (self.folder/'decoded.json').write_text(json.dumps(self.data),encoding='utf8')
+        self.store.ensure()
+        view=self.store.function_timeline(bins=240)
+        self.assertEqual(view['markerCount'],6001)
+        self.assertLessEqual(len(view['markers']),240)
+        self.assertGreater(view['markers'][-1]['seq'],5900)
+        self.assertEqual(sum(marker['count'] for marker in view['markers']),6001)
+        self.assertEqual(sum(sum(marker['types'].values()) for marker in view['markers']),6001)
 if __name__=='__main__':unittest.main()

@@ -5,7 +5,7 @@ import {EtmTarget} from './target.js';
 import {HistoryView} from './history.js';
 import {COMMON_TARGETS,completeClocks,targetPort} from './clock.js';
 const $=id=>document.getElementById(id),hex=n=>'0x'+(n>>>0).toString(16).padStart(8,'0'),sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const state={records:[],current:null,job:null,operation:false,elfInfo:null,elfId:null,elfFile:null,sourceFiles:{},sourceSnapshot:null,sourceCompat:false,sources:new SourceStore(),entryAddress:null,hseValues:{stm32h7b0:25},symbolAddress:null,waiting:false};
+const state={records:[],current:null,job:null,operation:false,elfInfo:null,elfId:null,elfFile:null,sourceFiles:{},sourceSnapshot:null,sourceCompat:false,sources:new SourceStore(),entryAddress:null,hseValues:{stm32h7b0:25},symbolAddress:null,waiting:false,traceConfigDirty:false};
 const target=new EtmTarget(log);
 async function api(path,body){const response=await fetch('/api/'+path,body===undefined?{}:{method:'POST',...(body instanceof FormData?{body}:{headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})});if(response.status===413)throw Error('提交内容超过本地服务容量限制；请更新页面并重新选择源码目录，按 ELF 匹配所需文件');const data=await response.json();if(!response.ok)throw Error(data.error||response.statusText);return data;}
 function log(message){$('log').textContent=new Date().toLocaleTimeString('zh-CN')+' '+message+'\n'+$('log').textContent;controls();}
@@ -34,6 +34,13 @@ function controls(){const busy=state.operation||!!state.job,connected=!!target.p
 function panel(name){for(const b of document.querySelectorAll('[data-panel]')){const active=b.dataset.panel===name;b.setAttribute('aria-selected',String(active));b.tabIndex=active?0:-1;$('panel-'+b.dataset.panel).hidden=!active;}document.querySelector('.sidebar-content').scrollTop=0;}
 for(const b of document.querySelectorAll('[data-panel]')){b.onclick=()=>panel(b.dataset.panel);b.onkeydown=e=>{const names=['target','clock','trace','files'],i=names.indexOf(b.dataset.panel);if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const next=e.key==='Home'?0:e.key==='End'?3:(i+(e.key==='ArrowLeft'?3:1))%4;panel(names[next]);$('tab-'+names[next]).focus();}};}
 function options(){return {traceid:Number($('traceid').value),returnStack:$('return-stack').checked,cycleCount:$('cycles').checked,pinSpeed:Number($('pin-speed').value)};}
+function updateTraceConfigState(info=target.info){
+  const label=$('trace-config-state');if(!label)return;
+  label.textContent=state.traceConfigDirty?'待应用设置已修改；硬件当前值见“寄存器回读”':'输入框跟随最近一次硬件回读；修改后保留为待应用设置';
+  label.classList.toggle('pending',state.traceConfigDirty);
+  label.title=info?.config?`硬件回读：Trace ID ${info.config.traceid??'未知'} · 返回栈压缩 ${!!(info.config.config&0x1000)} · 周期计数 ${!!(info.config.config&0x10)}`:'';
+}
+for(const id of ['traceid','return-stack','cycles'])$(id).addEventListener(id==='traceid'?'input':'change',()=>{state.traceConfigDirty=true;updateTraceConfigState();});
 const startupNames=new Set(['Reset_Handler','SystemInit','SystemClock_Config','main']);
 function entry(trace=false){
   if(!state.elfInfo)throw Error('先载入匹配的 ELF');
@@ -80,7 +87,8 @@ async function resumeBreakpoints(items){if(!target.probe)return;const running=!(
 async function withBreakpointsSuspended(fn){const items=target.breakpoints.items.filter(b=>b.lease);await target.halt();state.waiting=true;return withCleanup(async()=>{await target.breakpoints.suspend();renderBreakpoints();return await fn();},async()=>{state.waiting=false;await resumeBreakpoints(items);},e=>log('断点恢复失败（保留首次错误）：'+e.message));}
 async function showTarget(info){$('target-state').textContent=info.name+' · '+(info.halted?'已暂停':'运行中')+' · DEV_ID '+hex(info.device&4095);$('config-values').textContent=JSON.stringify(info,null,2);
   $('target-capability').textContent=info.traceSupported?'ETMv4 · H7B0 采集已验收':info.etmVersion+' · Trace 待适配';$('target-capability').title=info.traceStatus;$('expected-cpu').max=String(targetPort(info.profile).maxCoreHz/1e6);
-  if(info.traceSupported){$('traceid').value=info.config.traceid||2;$('return-stack').checked=!!(info.config.config&0x1000);$('cycles').checked=!!(info.config.config&0x10);}
+  if(info.traceSupported&&!state.traceConfigDirty){$('traceid').value=info.config.traceid??2;$('return-stack').checked=!!(info.config.config&0x1000);$('cycles').checked=!!(info.config.config&0x10);}
+  if(info.traceSupported)updateTraceConfigState(info);
   $('live-pc').textContent=info.halted?'当前 PC：'+hex(await target.pc()):'当前目标运行中；暂停后读取 PC';if(info.halted)target.breakpoints.hit(await target.pc());showClocks(info);renderBreakpoints();
 }
 function showClocks(info=target.info){const c=info?.clocks,mhz=n=>n===null||n===undefined?'未知':(n/1e6).toFixed(3)+' MHz';$('clock-state').textContent=info?.clockError||(c?'CPU '+mhz(c.coreHz)+' / HCLK '+mhz(c.hclkHz)+' / TRACECLK '+mhz(c.physicalTraceHz)+'\n'+c.path:'尚未连接；填写的预期值不是回读结果');
@@ -124,13 +132,13 @@ async function watchJob(id,{resume=false}={}){state.job=id;controls();let resume
 on('connect',async()=>{target.profile=$('target-profile').value;target.hseHz=null;const info=await target.connect();const hse=state.hseValues[info.profile]??state.hseValues.auto;$('hse').value=hse??'';target.hseHz=hse?hse*1e6:null;if(state.hseValues.auto!==undefined){state.hseValues[info.profile]=hse;delete state.hseValues.auto;}await showTarget(await target.inspect());if(state.elfInfo&&target.breakpoints.items.some(b=>b.enabled)){await target.verifyElf(state.elfInfo);await target.breakpoints.resume();await showTarget(await target.inspect());}});
 on('recover-debug',async()=>{await showTarget(await target.recoverDebugPort());$('job-state').classList.remove('bad');$('job-state').textContent='调试口已恢复，目标暂停；请重新联动采集';});
 on('disconnect',async()=>{await target.disconnect();target.info=null;showClocks();$('target-state').textContent='探针已断开';$('live-pc').textContent='当前 PC：未连接';renderBreakpoints();});
-on('read-config',async()=>showTarget(await target.inspect()));on('read-clock',async()=>showTarget(await target.inspect()));on('halt',async()=>{await target.halt();await showTarget(await target.inspect());});
+on('read-config',async()=>{const info=await target.inspect();state.traceConfigDirty=false;await showTarget(info);});on('read-clock',async()=>showTarget(await target.inspect()));on('halt',async()=>{await target.halt();await showTarget(await target.inspect());});
 on('run',async()=>{await target.clearEntryBreak();await target.run();await showTarget(await target.inspect());});
 on('reset',async()=>{await target.verifyElf(state.elfInfo);await showTarget(await withBreakpointsSuspended(()=>target.reset({address:entry()})));$('break-state').textContent='已暂停在所选起点；调试断点已恢复';});
 on('run-to',async()=>{await target.verifyElf(state.elfInfo);$('break-state').textContent='正在运行至所选断点…';await showTarget(await withBreakpointsSuspended(()=>target.runTo(entry())));$('break-state').textContent='已命中 '+hex(entry())+'；调试断点已恢复';});
 on('remove-break',async()=>{if(target.probe)await target.halt();await target.breakpoints.clear();state.entryAddress=null;renderSymbols();renderBreakpoints();if(target.probe)await showTarget(await target.inspect());});
 on('cancel-wait',async()=>{target.cancelEntry=true;log('已请求取消等待断点');},{exclusive:false});
-on('apply-config',async()=>{entry(true);await showTarget(await target.configure(options()));});on('restore-config',async()=>{await target.restore();$('target-state').textContent='原 trace 设置已恢复';});
+on('apply-config',async()=>{entry(true);const info=await target.configure(options());state.traceConfigDirty=false;await showTarget(info);});on('restore-config',async()=>{await target.restore();$('target-state').textContent='原 trace 设置已恢复';});
 on('check-la',async()=>{const s=await api('status');$('la-state').textContent='Kingst 已连接';$('la-state').className='status good';const old=$('rate').value;$('rate').replaceChildren(...s.rates.filter(n=>n>=50000000).map(n=>new Option(n/1e6+' MSa/s',n)));$('rate').value=s.rates.includes(Number(old))?old:String(s.rates[0]);clockPlan();});
 on('open-record',()=>loadRecord($('records').value));
 on('start',async()=>{const sync=$('sync').checked,channels=$('channels').value.split(',').map(s=>Number(s.trim()));if(channels.length!==5||new Set(channels).size!==5||channels.some(c=>!Number.isInteger(c)||c<0||c>15))throw Error('需要五个不同的 CH0～15 通道');

@@ -40,16 +40,17 @@
 
 - `capture-10ms.etmrecord`：原始 CSV、Kingst 档案、匹配 ELF、源码、采集和滤波设置；可在网页导入后重新解码。
 - `decoded.json.gz`：完整解码结果的压缩备份。
-- `execution.c`：完整源码执行流，约 92 MB。
-- `execution-simplified.c`：合并连续同源码行的执行流，约 20 MB；保留未知条件标记。
+- `execution.c`、`execution-simplified.c`：由 10 ms 记录导出的完整与简化源码流。两个大型文本文件不纳入 Git；其字节数和 SHA256 仍保存在 `manifest.json` 中供原工作区核对。
 - `validation.json`：包覆盖、实际分支/发送核对、相位扫描、硬件与滤波快照。
-- `manifest.json`：固件、记录 ID、参数及上述文件的 SHA256；不同内容拒绝覆盖。
+- `manifest.json`：固件、记录 ID、参数及基准产物的 SHA256；不同内容拒绝覆盖。
 
-原始工作记录：10 ms 为 `../../records/capture-8365b3adb65b4f0cb281e55aef2c89c7/`，1 ms 为 `../../records/capture-926a4f2b899542f5b566e68a1d1eb631/`。
+需要重建源码流时，在网页导入 `capture-10ms.etmrecord` 并单独解码，再从“文件”页导出完整源码或简化 C。Git 保存压缩记录和解码 JSON，不保存约 110 MB 的源码导出文件。
+
+本机原始工作记录：10 ms 为 `../../records/capture-8365b3adb65b4f0cb281e55aef2c89c7/`，1 ms 为 `../../records/capture-926a4f2b899542f5b566e68a1d1eb631/`。`records/` 属于本地运行数据，不纳入 Git。
 
 ## 网页与后续操作
 
-打开 http://127.0.0.1:8766 。默认显示 1 ms 复验预览并绑定封存固件；点击“查看 10 ms 实测”打开完整窗口。执行顺序、调用统计、火焰图、热点和完整性视图均使用同一记录。火焰图仍按指令路径数量加权，不等于耗时。
+打开 http://127.0.0.1:8766 。本机保留 `records/` 时可从列表打开 1 ms 复验预览；在干净副本中导入 `capture-10ms.etmrecord` 查看封存记录。历史记录使用各自保存的 ELF 与源码快照。执行顺序、调用统计、火焰图、热点和完整性视图均使用同一记录。火焰图仍按指令路径数量加权，不等于耗时。
 
 下次采集保持 70/35 档和上述参数，在业务入口复位后联动采集。使用 `tools/flash_spi.py 70` 时优先烧录封存 BIN。执行 `tools/freeze-spi-70.mjs` 仅会采集本档，不进行频率扫描；需要本地 SWD 验收适配服务。`package_spi_baseline.py` 拒绝用不同内容覆盖 v1，后续更新应建立新版本。
 

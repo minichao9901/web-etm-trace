@@ -175,10 +175,9 @@ def index():
 
 @app.get('/app/shared/dbg/source.js')
 def shared_source_store():
-    # Use the very same module as debug/SWO when the main workspace is present.
-    # The identical bundled copy keeps this standalone project portable.
-    upstream=ROOT.parent/'web-serial-rtt-tools/app/dbg/source.js'
-    return send_file(upstream if upstream.is_file() else ROOT/'web/app/shared/dbg/source.js',mimetype='text/javascript')
+    # Serve the copy committed with this project so page behavior is stable
+    # regardless of which SWO checkout happens to be beside it at runtime.
+    return send_file(ROOT/'web/app/shared/dbg/source.js',mimetype='text/javascript')
 
 
 @app.get('/api/status')
@@ -547,6 +546,13 @@ def capture_job(jid, sid, options):
 @app.post('/api/capture')
 def start_capture():
     o = request.get_json()
+    elf_id=o.get('elfId') if isinstance(o,dict) else None
+    if not isinstance(elf_id,str) or not re.fullmatch(r'elf-[0-9a-f]{32}',elf_id):
+        raise ValueError('联动采集必须先载入明确的 ELF；不会自动绑定示例固件。')
+    elf=directory(elf_id)/'firmware.elf'
+    if not elf.is_file():
+        raise ValueError('载入的 ELF 已失效，请重新选择固件。')
+    elf_info(elf)
     source_files = read_source_snapshot(o['elfId'],o['sourceSnapshot']) if o.get('sourceSnapshot') else o.get('sources', {})
     o = dict(rate=int(o.get('rate', 100000000)), seconds=float(o.get('seconds', .01)),
              threshold=float(o.get('threshold', 1.65)), sync=bool(o.get('sync')),
@@ -568,7 +574,6 @@ def start_capture():
     sid = 'capture-' + uuid.uuid4().hex
     folder = directory(sid)
     folder.mkdir()
-    elf = directory(o['elfId']) / 'firmware.elf' if o['elfId'] else ROOT / 'firmware/stm32h7b0_etm_board_v1/fw.elf'
     (folder / 'firmware.elf').write_bytes(elf.read_bytes())
     if source_files:
         (folder / 'sources.json').write_text(json.dumps(source_files), encoding='utf-8')

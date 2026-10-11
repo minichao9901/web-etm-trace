@@ -26,14 +26,20 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(sum(r['recordKind']=='demo' for r in records),1)
         self.assertEqual({r['id'] for r in records},{demo,'manual','early'})
 
-    def test_etm_uses_the_same_source_store_module_as_main_debug_and_swo(self):
+    def test_etm_serves_its_committed_source_store_copy(self):
         upstream=ROOT.parent/'web-serial-rtt-tools/app/dbg/source.js'
         bundled=ROOT/'web/app/shared/dbg/source.js'
         self.assertEqual(bundled.read_bytes(),upstream.read_bytes())
         response=self.client.get('/app/shared/dbg/source.js')
         self.assertEqual(response.status_code,200)
-        self.assertEqual(response.data,upstream.read_bytes())
+        self.assertEqual(response.data,bundled.read_bytes())
         response.close()
+
+    def test_capture_requires_an_explicit_uploaded_elf_before_creating_a_job(self):
+        response=self.client.post('/api/capture',json={'seconds':.01})
+        self.assertEqual(response.status_code,400)
+        self.assertIn('明确的 ELF',response.json['error'])
+        self.assertEqual(list(Path(self.folder.name).iterdir()),[])
 
     def test_source_snapshot_batches_are_immutable_and_capture_uses_small_reference(self):
         from unittest.mock import patch

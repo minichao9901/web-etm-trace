@@ -141,13 +141,16 @@ class RecordStore:
             if other:labels.append(dict(key='other',name='其他函数',kind='other',records=other))
             if unknown:labels.append(dict(key='unknown',name='执行状态未知',kind='unknown',records=unknown))
             if not hide_skipped and not_taken:labels.append(dict(key='not-taken',name='未成立路径（未证实执行）',kind='not-taken',records=not_taken))
-            span=max(1,hi-lo+1);values={lane['key']:[0]*bins for lane in labels};markers=[];marker_count=0
+            span=max(1,hi-lo+1);values={lane['key']:[0]*bins for lane in labels};marker_bins={};marker_count=0
             for seq,kind,fn,state,event_type in db.execute(
                     'SELECT seq,kind,fn,state,type FROM events WHERE '+clause+' ORDER BY seq',query_params):
                 if kind!='instruction':
                     if event_type in (1,2,3,6,7,8,9,10):
                         marker_count+=1
-                        if len(markers)<5000:markers.append(dict(seq=seq,type=event_type))
+                        index=min(bins-1,max(0,(seq-lo)*bins//span))
+                        bucket=marker_bins.setdefault(index,dict(startSeq=seq,endSeq=seq,seq=seq,types={}))
+                        bucket['endSeq']=seq
+                        bucket['types'][str(event_type)]=bucket['types'].get(str(event_type),0)+1
                     continue
                 if state=='executed':
                     name=fn or '(未知函数)';key='fn:'+name if ('fn:'+name) in values else 'other'
@@ -156,6 +159,10 @@ class RecordStore:
                 if key not in values:continue
                 index=min(bins-1,max(0,(seq-lo)*bins//span));values[key][index]+=1
             for lane in labels:lane['bins']=values[lane['key']]
+            markers=[]
+            for bucket in marker_bins.values():
+                bucket['count']=sum(bucket['types'].values())
+                markers.append(bucket)
         return dict(range=dict(start=lo,end=hi,totalStart=total_start,totalEnd=total_end),
                     lanes=labels,binCount=bins,markers=markers,markerCount=marker_count,
                     summary=dict(executed=sum(counts.values()),unknown=unknown,notTaken=not_taken,

@@ -70,6 +70,7 @@
 #etm-app .compact-metrics,#etm-app .dim{color:var(--fg2);font-size:var(--text-xs)}
 #etm-app .quality{color:var(--fg2);background:transparent;border-left:2px solid var(--acc);font-size:11px;line-height:16px;margin:0;padding:0 6px}
 #etm-app .quality.warn{color:var(--warn);background:#d2992210;border-color:var(--warn)}
+#etm-app #trace-config-state.pending{color:var(--warn)}
 #etm-app .analysis-toolbar{gap:4px;min-height:0}
 #etm-app .tabs{gap:2px}
 #etm-app .tabs button{font-size:var(--text-xs);padding:2px 7px;background:transparent;border:1px solid transparent;border-radius:var(--radius-control);color:var(--fg2)}

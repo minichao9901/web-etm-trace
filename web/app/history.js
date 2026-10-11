@@ -81,7 +81,7 @@ export class HistoryView{
     const data=this.timelineData;if(!data)return true;this.timelineChart.setData(data);this.timelineChart.setCursor(this.selected);
     const summary=data.summary,range=data.range;
     this.updateZoomControlState();
-    $('execution-timeline-summary').textContent=`#${n(range.start)}～#${n(range.end)} · ${n(summary.executed)} 条已证实 · ${n(summary.unknown)} 条未知`+(summary.notTaken?` · ${n(summary.notTaken)} 条未成立`:'')+(summary.markers?` · ${n(summary.markers)} 个边界 / 中断`:'');
+    $('execution-timeline-summary').textContent=`#${n(range.start)}～#${n(range.end)} · ${n(summary.executed)} 条已证实 · ${n(summary.unknown)} 条未知`+(summary.notTaken?` · ${n(summary.notTaken)} 条未成立`:'')+(summary.markers?` · ${n(summary.markers)} 个边界 / 中断${data.markers.length<summary.markers?`（图中合并为 ${n(data.markers.length)} 段）`:''}`:'');
     return true;
   }
   updateZoomControlState(){

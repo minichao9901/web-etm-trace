@@ -43,7 +43,8 @@ export function bindFunctionTimeline(canvas,{onRange,onSelect,onError}){
     // ETM synchronization, incomplete-path, and exception elements remain visible as sequence markers.
     for(const marker of data.markers||[]){
       const x=left+(marker.seq-range.start)/span*plotWidth;if(x<left||x>left+plotWidth)continue;
-      context.strokeStyle=marker.type===9||marker.type===10?'#58a6ff':marker.type===2?'#3fb950':'#f0883e';
+      const types=Object.entries(marker.types||{[marker.type]:1}),single=types.length===1?Number(types[0][0]):null;
+      context.strokeStyle=single===9||single===10?'#58a6ff':single===2?'#3fb950':types.length>1?'#bc8cff':'#f0883e';
       context.globalAlpha=.75;context.beginPath();context.moveTo(x,top-3);context.lineTo(x,plotBottom);context.stroke();context.globalAlpha=1;
     }
     if(cursor!==null&&cursor>=range.start&&cursor<=range.end){
@@ -70,8 +71,10 @@ export function bindFunctionTimeline(canvas,{onRange,onSelect,onError}){
     if(p.x<Number(canvas.dataset.plotLeft||0)){canvas.title='';return;}
     const index=Math.max(0,Math.min((data.binCount||1)-1,Math.floor(p.pct*(data.binCount||1))));
     const occupied=(data.lanes||[]).filter(lane=>lane.bins?.[index]).map(lane=>lane.name+' '+number(lane.bins[index])+' 条');
-    const marker=(data.markers||[]).find(item=>Math.abs(item.seq-p.seq)<=Math.max(1,(data.range.end-data.range.start)/100));
-    canvas.title='#'+number(p.seq)+(occupied.length?' · '+occupied.join('；'):' · 当前分辨率下无路径记录')+(marker?' · '+(eventNames[marker.type]||'ETM 事件'):'');
+    const span=Math.max(1,data.range.end-data.range.start+1),marker=(data.markers||[]).map(item=>({item,distance:Math.abs(left+(item.seq-data.range.start)/span*plotWidth-p.x)})).filter(entry=>entry.distance<=8).sort((a,b)=>a.distance-b.distance)[0]?.item;
+    const markerTypes=marker?.types||((marker?.type!==undefined)?{[marker.type]:1}:null);
+    const markerDetail=marker&&markerTypes?Object.entries(markerTypes).map(([type,count])=>`${eventNames[type]||'ETM 事件'} ${number(count)} 个`).join('；'):'';
+    canvas.title='#'+number(p.seq)+(occupied.length?' · '+occupied.join('；'):' · 当前分辨率下无路径记录')+(marker?` · #${number(marker.startSeq??marker.seq)}～#${number(marker.endSeq??marker.seq)} ${markerDetail}`:'');
   });
   canvas.addEventListener('pointerup',event=>{
     if(!drag)return;const state=drag,end=position(event),startX=state.x;drag=null;canvas.releasePointerCapture(event.pointerId);frame();
