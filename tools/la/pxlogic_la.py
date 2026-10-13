@@ -25,8 +25,8 @@
   · 客户端对未显式指定超时的调用统一钳到 30 s，超大导出可能超时；
   · 所有 CLI 调用共享 PXView 的同一个会话，不能并发跑两条采集/导出。
 
-本工具不启动、不关闭 PXView 进程，也不改动它的配置，只发采集/导出命令，
-避免和正在运行的 PXView GUI 抢设备。
+本工具不启动、不关闭 PXView 进程；采集命令会设置通道、采样率、时长与阈值。
+CLI 和 GUI 共用一个会话，使用时须串行操作。
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 DEFAULT_CHANNELS = [0, 1, 2, 3, 4]          # CH0=TRACECLK，CH1..4=D0..D3（本工程接线）
 CLI_CANDIDATES = (
@@ -203,14 +204,18 @@ def transitions(data: bytes, samples: int | None = None) -> list[int]:
         samples = len(data) * 8
     if samples <= 0:
         return []
-    value = int.from_bytes(data, "little")
-    diff = value ^ (value >> 1)
-    diff &= (1 << (samples - 1)) - 1          # 丢掉最高位（它与不存在的样本比较）
     out: list[int] = []
-    while diff:
-        low = diff & -diff
-        out.append(low.bit_length())           # 位号 + 1
-        diff ^= low
+    # 分块避免每个跳变都复制整个百万位整数；保留块边界的相邻样本比较。
+    for offset in range(0, (samples + 7) // 8, 1024):
+        bits = min(8192, samples - offset * 8)
+        value = int.from_bytes(data[offset:offset + 1024], "little")
+        diff = (value ^ (value << 1)) & ((1 << bits) - 1)
+        previous = level_at(data, offset * 8 - 1) if offset else (value & 1)
+        diff ^= previous
+        while diff:
+            low = diff & -diff
+            out.append(offset * 8 + low.bit_length() - 1)
+            diff ^= low
     return out
 
 
@@ -284,12 +289,14 @@ def channel_stats(directory: Path, channel: int, rate: int, samples: int | None 
     if samples % 8 and valid:                      # 末字节的补齐位不算进占空比
         high -= bin(valid[-1] >> (samples % 8)).count("1")
     rising = [i for i in edges if level_at(data, i) == 1]
+    periods = sorted(b - a for a, b in zip(rising, rising[1:]))
+    median_period = periods[len(periods) // 2] if periods else None
     half_periods = [b - a for a, b in zip(edges, edges[1:])]
     ordered = sorted(half_periods)
     median_half = ordered[len(ordered) // 2] if ordered else None
-    # 🚨 频率用**中位半周期**算，不要用首末边沿跨度：采集起点常有一个 1 样本毛刺，
-    #    跨度法会被它带偏百分之几（本机 LA 自身 PWM0 实测 1008~1023 Hz vs 真实 1000 Hz）。
-    frequency = round(rate / (2 * median_half), 3) if median_half else None
+    # 🚨 频率用**中位完整周期**算，不要用首末边沿跨度：采集起点常有一个 1 样本毛刺，
+    #    同极性沿之间的完整周期也适用于非 50% 占空比参考，避免把高/低宽度当半周期。
+    frequency = round(rate / median_period, 3) if median_period else None
     span_frequency = None
     if len(rising) > 1 and rising[-1] > rising[0]:
         span_frequency = round((len(rising) - 1) * rate / (rising[-1] - rising[0]), 3)
@@ -308,6 +315,7 @@ def channel_stats(directory: Path, channel: int, rate: int, samples: int | None 
         "frequency_hz": frequency,
         "frequency_from_span_hz": span_frequency,
         "median_half_period_samples": median_half,
+        "median_period_samples": median_period,
         "min_half_period_samples": ordered[0] if ordered else None,
         "max_half_period_samples": ordered[-1] if ordered else None,
         "half_period_stable_percent": round(stable * 100, 2) if stable is not None else None,
@@ -317,7 +325,7 @@ def channel_stats(directory: Path, channel: int, rate: int, samples: int | None 
 
 
 def print_stats(directory: Path, channels: list[int], rate: int, samples: int | None = None) -> dict:
-    print(f"采样率 {rate/1e6:g} MSa/s（按请求值换算；PXView CLI 不回读实际采样率）  目录 {directory}")
+    print(f"采样率 {rate/1e6:g} MSa/s（按传入采样率换算；是否核验见 capture.json）  目录 {directory}")
     report = {}
     for channel in channels:
         if not (directory / f"channel_{channel}.bin").exists():
@@ -395,6 +403,19 @@ def prepare_raw_dir(directory: Path, reuse: bool) -> list[str]:
     return stale
 
 
+def validate_export(directory: Path, channels: list[int], started: float) -> int:
+    """确认所选通道本次真的导出，返回按字节补齐的容量。"""
+    paths = [directory / f"channel_{c}.bin" for c in channels]
+    if not paths or any(not p.is_file() for p in paths):
+        raise SystemExit("导出缺少所选通道文件，拒绝使用旧数据")
+    if any(p.stat().st_mtime < started - 1.0 for p in paths):
+        raise SystemExit("位流时间戳早于本次导出，拒绝使用残留数据")
+    sizes = {p.stat().st_size for p in paths}
+    if len(sizes) != 1 or 0 in sizes:
+        raise SystemExit("所选通道位流为空或长度不一致，导出不完整")
+    return sizes.pop() * 8
+
+
 def reconcile_samples(requested: int, padded: int, force: bool) -> int:
     """核对导出容量与请求样本数，返回用于生成时间轴的真实样本数。
 
@@ -420,15 +441,15 @@ def verify_rate_from_reference(directory: Path, channel: int, expected_hz: float
 
     PXView CLI 不回读采样率，但只要捕获里有频率已知的信号（本机是 LA 自身 PWM0 = 1 kHz，
     ETM 场景是目标板已知的 TRACECLK），就能从半周期样本数反推：
-        实测采样率 = 中位半周期样本数 × 2 × 已知频率
+        实测采样率 = 中位完整周期样本数 × 已知频率
     这样「容量与请求不符」是**采样率变了**还是**只是窗口长了一点**就能分开
     （Codex review 2026-10-13 第二条要求区分 requested / actual）。
     """
     item = channel_stats(directory, channel, requested_rate, samples)
-    half = item["median_half_period_samples"]
-    if not half:
-        raise SystemExit(f"参考通道 CH{channel} 没有可用的半周期，无法反推采样率")
-    measured = half * 2 * expected_hz
+    period = item["median_period_samples"]
+    if not period or item["rising"] < 4 or expected_hz <= 0:
+        raise SystemExit(f"参考通道 CH{channel} 至少需要三个完整周期和有效参考频率")
+    measured = period * expected_hz
     return measured, abs(measured - requested_rate) / requested_rate
 
 
@@ -443,14 +464,14 @@ def cmd_capture(args) -> int:
 
     device = pick_device(cli, args.device, demo=args.demo, timeout=args.timeout)
     out_path = Path(args.out).resolve()
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex
     if args.raw_dir:
         raw = Path(args.raw_dir).resolve()
         stale = prepare_raw_dir(raw, reuse=args.reuse_raw)
     else:
         # 每次采集一个唯一目录，绝不和历史位流混在一起。
         raw = Path(str(out_path.with_suffix("")) + ".pxlogic") / stamp
-        stale = prepare_raw_dir(raw, reuse=True)
+        stale = prepare_raw_dir(raw, reuse=False)
     if stale:
         print(f"已清掉导出目录里的旧位流：{'、'.join(stale)}")
 
@@ -486,19 +507,7 @@ def cmd_capture(args) -> int:
         run_cli(cli, ["export", "--format", "csv", "--dir", str(raw),
                       "--digital-channels", ",".join(str(c) for c in channels)], args.timeout, json_out=False)
 
-    missing = [c for c in channels if not (raw / f"channel_{c}.bin").exists()]
-    if missing:
-        raise SystemExit(f"导出缺少通道文件：{missing}（PXView 只导出已使能的通道）")
-    # 新鲜度：目录已清空过，再核对 mtime 确实属于本次导出。
-    stale_out = [p.name for p in sorted(raw.glob("channel_*.bin"))
-                 if p.stat().st_mtime < export_started - 1.0]
-    if stale_out:
-        raise SystemExit(f"这些位流的时间戳早于本次导出，判定为残留：{stale_out}")
-    sizes = {p.stat().st_size for p in raw.glob("channel_*.bin")}
-    if len(sizes) != 1:
-        raise SystemExit(f"各通道位流长度不一致：{sorted(sizes)}；导出不完整，拒绝使用。")
-
-    padded = sizes.pop() * 8
+    padded = validate_export(raw, channels, export_started)
     requested_samples = (args.samples if args.samples is not None else round(rate * seconds))
     rate_verified = False
     measured_rate = None
@@ -514,10 +523,10 @@ def cmd_capture(args) -> int:
             )
         rate_verified = True
     expected = reconcile_samples(requested_samples, padded, force=args.force or rate_verified)
-    count_mismatch = padded != requested_samples
+    count_mismatch = not 0 <= padded - requested_samples < 8
     if count_mismatch:
         if rate_verified:
-            print(f"采集窗口比请求长：实际 {padded} 样本，请求 {requested_samples} 样本"
+            print(f"采集容量与请求不符：实际 {padded} 样本，请求 {requested_samples} 样本"
                   f"（+{(padded - requested_samples) / requested_samples * 100:.3f}%）；"
                   f"按实际容量生成时间轴，采样率已用参考信号核对。")
         else:
@@ -526,7 +535,8 @@ def cmd_capture(args) -> int:
 
     csv_path = out_path
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    summary = write_transition_csv(raw, csv_path, channels, rate, samples=expected)
+    effective_rate = measured_rate if rate_verified else rate
+    summary = write_transition_csv(raw, csv_path, channels, effective_rate, samples=expected)
     files = {p.name: {"bytes": p.stat().st_size, "sha256": sha256(p),
                       "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds")}
              for p in sorted(raw.glob("channel_*.bin"))}
@@ -542,11 +552,11 @@ def cmd_capture(args) -> int:
             # 请求值与实际值必须分开：PXView CLI 没有回读采样率/样本数的子命令，
             # 只能核对导出容量是否与请求相符，所以实际采样率**未证实**，
             # 由它换算的时间轴与频率也只是「按请求值换算」，不能当已实测。
-            "requested": {"sample_rate_hz": rate, "seconds": seconds, "samples": args.samples},
+            "requested": {"sample_rate_hz": rate, "seconds": seconds, "samples": requested_samples},
             "actual": {"samples": summary["samples"], "export_capacity_samples": padded,
                        "sample_rate_hz": measured_rate, "verified": rate_verified,
                        "count_mismatch": count_mismatch,
-                       "source": ("参考信号反推：中位半周期样本数 × 2 × 已知频率"
+                       "source": ("参考信号反推：中位完整周期样本数 × 已知频率"
                                   if rate_verified else
                                   "PXView CLI 无采样率回读接口；只在导出容量与请求不符时判定设备未按请求采集")},
             "threshold_volts": args.threshold, "trigger": args.trigger,
@@ -554,7 +564,8 @@ def cmd_capture(args) -> int:
             "wall_seconds": round(elapsed, 3),
             "state": state,
             "window_ms": round(summary["window_ms"], 6),
-            "rate_basis": "时间轴与频率按请求采样率换算",
+            "rate_basis": "参考信号核验值" if rate_verified else "请求采样率（未核验）",
+            "time_axis_rate_hz": effective_rate,
         },
         "files": files,
         "stale_removed": stale,
@@ -570,7 +581,7 @@ def cmd_capture(args) -> int:
     print(f"  采集清单：{raw / 'capture.json'}")
     if count_mismatch:
         if rate_verified:
-            print(f"  采集窗口比请求长（{padded} vs {requested_samples} 样本），已按实际容量生成时间轴。")
+            print(f"  采集容量与请求不符（{padded} vs {requested_samples} 样本），已按实际容量生成时间轴。")
         else:
             print("⚠ 导出容量与请求样本数不符（--force 已放行）：时间轴按请求采样率换算，不可当已证实。")
     if rate_verified:
@@ -581,7 +592,7 @@ def cmd_capture(args) -> int:
               "（清单里 actual.verified=false；可加 --verify-hz 用参考信号核对）。")
     if args.stats:
         print()
-        print_stats(raw, channels, rate, expected)
+        print_stats(raw, channels, effective_rate, expected)
     return 0
 
 
@@ -618,20 +629,23 @@ def cmd_selftest(args) -> int:
     channel = parse_channels(args.channel)[0]
     rate = parse_rate(args.rate)
     seconds = parse_seconds(args.time)
-    scratch = Path(args.dir).resolve()
-    scratch.mkdir(parents=True, exist_ok=True)
+    scratch = Path(args.dir).resolve() / uuid4().hex
+    prepare_raw_dir(scratch, reuse=False)
 
     device = pick_device(cli, args.device, demo=args.demo, timeout=args.timeout)
     run_cli(cli, ["capture", "--device", str(device.get("id")), "--channels", str(channel),
                   "--rate", str(rate), "--time", str(seconds), "--threshold", str(args.threshold)],
             args.timeout)
     info = status(cli, args.timeout)
-    if info.get("state") != "completed":
+    if info.get("state") != "completed" or not info.get("have_hardware_data"):
         print(f"自检失败：采集状态 {info.get('state')}")
         return 2
+    export_started = time.time()
     run_cli(cli, ["export", "--format", "binary", "--dir", str(scratch)], args.timeout, json_out=False)
+    capacity = validate_export(scratch, [channel], export_started)
+    samples = reconcile_samples(round(rate * seconds), capacity, force=False)
 
-    item = channel_stats(scratch, channel, rate, round(rate * seconds))
+    item = channel_stats(scratch, channel, rate, samples)
     frequency = item["frequency_hz"]
     print(json.dumps({"device": device.get("display_name"), "rate_hz": rate,
                       "channel": channel, "stats": item}, ensure_ascii=False, indent=2))
@@ -641,7 +655,7 @@ def cmd_selftest(args) -> int:
     if args.expect_hz:
         low, high = args.expect_hz * (1 - args.tolerance), args.expect_hz * (1 + args.tolerance)
         ok = frequency is not None and low <= frequency <= high
-        checks.append(("频率在容差内（中位半周期）", ok,
+        checks.append(("频率在容差内（中位完整周期）", ok,
                        f"实测 {frequency} Hz，期望 {args.expect_hz} Hz（±{args.tolerance*100:g}%）；"
                        f"跨度法给 {item['frequency_from_span_hz']} Hz"))
     checks.append(("毛刺数量", item["glitch_count"] <= args.max_glitches,

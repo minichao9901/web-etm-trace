@@ -12,7 +12,7 @@ CLI 读不到设备实际采样率，所以工具**不把请求值当已实测**
   「按请求采样率换算」，不能当已证实；
 - 导出容量与请求样本数不符（差不在 0~7 个补齐位内）时**默认拒绝**，给出 `--force`（放行但记 `count_mismatch`）
   和 `--verify-hz`（用采集里已知频率的参考信号反推实际采样率，通过则 `actual.verified=true`）两条明确出路；
-- 每次采集用**唯一目录**（`<out 同名>.pxlogic/<时间戳>/`）；`--raw-dir` 指向已有目录时默认拒绝，
+- 每次采集用**唯一目录**（`<out 同名>.pxlogic/<时间戳-UUID>/`）；`--raw-dir` 指向已有目录时默认拒绝，
   `--reuse-raw` 才允许并先清掉里面的旧 `channel_*.bin`；导出后还会核对每个文件的 mtime 属于本次导出、
   各通道长度一致，避免把上次波形当本次结果；
 - 清单记录每个 bin 的字节数、SHA256、mtime 与 `stale_removed`。
@@ -21,6 +21,14 @@ CLI 读不到设备实际采样率，所以工具**不把请求值当已实测**
 **10,048 / 50,048** 样本（比请求多 48），而 10 MSa/s 的 20 ms / 100 ms 与 500 MSa/s 的 2 ms / 10 ms
 精确相符。用 `--verify-hz 1000`（CH0 接 LA 自身 PWM0）核对：实测采样率 10.000000 MSa/s、偏差 0.0000%，
 即**采样率没变，只是窗口长了一点**——这正是 `--verify-hz` 存在的意义。
+
+
+集成复核补充（Codex）：
+
+- 秒级时间戳追加 UUID，快速连续采集也不覆盖旧位流；自检同样使用独立目录并拒绝空、缺失、过期的导出。
+- 参考信号核验至少需要三个完整周期，以同极性沿的中位完整周期推算采样率。核验通过后，CSV、窗口时长和统计均使用核验值，记录 `time_axis_rate_hz`；未核验时明确标为请求值。
+- 正常的末字节补齐单独记录 `padding_samples`，不会误标为采集样本数不符。
+- 跳变提取改为分块处理，避免密集 Trace 波形对每个边沿重复处理整个百万位整数。
 
 ## 1. 为什么这样做
 
@@ -40,7 +48,7 @@ tools/trace_port.py / tools/decode_trace.py（与 Kingst 采集完全相同的�
 ## 2. 命令
 
 ```powershell
-cd E:\web-etm-trace-worktrees\other-ai-f103-ui
+cd E:\web-etm-trace
 
 # 设备与服务状态
 python -X utf8 tools\la\pxlogic_la.py info
@@ -70,8 +78,8 @@ python -X utf8 tools\la\pxlogic_la.py stats captures\raw --rate 500M --samples 1
 | 产物 | 说明 |
 |---|---|
 | `<out>.csv` | 与 Kingst 同构的跳变 CSV（UTF-8 BOM，表头 `Time[s], 通道 N`），直接喂 `tools/trace_port.py` |
-| `<out 同名>.pxlogic/<时间戳>/channel_N.bin` | PXView 原始位打包位流，8 样本/字节、LSB-first、逐通道、无文件头 |
-| `<out 同名>.pxlogic/<时间戳>/capture.json` | 采集清单：设备、请求/实际采样率与样本数、阈值、各文件 SHA256 与 mtime、`stale_removed`、实际用过的命令行 |
+| `<out 同名>.pxlogic/<时间戳-UUID>/channel_N.bin` | PXView 原始位打包位流，8 样本/字节、LSB-first、逐通道、无文件头 |
+| `<out 同名>.pxlogic/<时间戳-UUID>/capture.json` | 采集清单：设备、请求/实际采样率与样本数、阈值、各文件 SHA256 与 mtime、`stale_removed`、实际用过的命令行 |
 
 `--raw-dir` 可把位流目录指到别处（已有旧位流时默认拒绝，加 `--reuse-raw` 才清空复用）；
 `--with-csv` 额外导出 PXView 的逐样本 CSV（每通道一个大文件，仅人工查看用）；
@@ -95,7 +103,7 @@ python -X utf8 tools\la\pxlogic_la.py stats captures\raw --rate 500M --samples 1
    所以 `transitions()` / `write_transition_csv()` / `channel_stats()` 都必须传**真实样本数**（`capture` 内部按
    采样率 × 时长算并核对容量，差 <8 样本才接受）。已加回归测试。
 3. **频率别用“首末边沿跨度”算**：采集起点常有一个 1 样本毛刺，跨度法会把 1 kHz 算成 1008~1023 Hz。
-   用**中位半周期**（工具默认），同时报告 `frequency_from_span_hz` 与毛刺数以便对账。
+   用**同极性沿之间的中位完整周期**（工具默认，不要求 50% 占空比），同时报告 `frequency_from_span_hz` 与毛刺数以便对账。
 4. **CLI 没有 stop/取消子命令**（子命令只有 14 个：list-devices、scan、channels、capture、decode、results、
    export、export-table、samples、status、save、load、run、list-decoders）。等待触发的采集挂住只能去界面里停，
    所以所有调用都必须带超时（工具默认 60 s）。
@@ -114,7 +122,7 @@ python -X utf8 tools\la\pxlogic_la.py stats captures\raw --rate 500M --samples 1
 
 ## 5. 与 Web 界面集成（两个 LA 后端）
 
-对上层只要统一这四项，Kingst / PXLogic 就是等价后端：
+文件层兼容已验证；Web 断点联动还需要就绪通知、有效触发、停止和错误清理接口，当前不能把两个后端视为等价联动实现：
 
 | 接口 | Kingst（现状） | PXLogic（本次） |
 |---|---|---|
@@ -125,7 +133,7 @@ python -X utf8 tools\la\pxlogic_la.py stats captures\raw --rate 500M --samples 1
 
 解码入口不变：两者都产出 `Time[s], 通道 N` 跳变 CSV → `tools/trace_port.py`（DDR 提取）；
 PXLogic 另有直读位流的 `tools/pxlogic_trace_port.py`（不经过 CSV，少一层转换）。
-界面侧需要新增的只有：后端选择 + 设备列表 + 采样率/时长/阈值三个参数，以及把 `capture.json` 记进记录包。
+界面接入前必须补齐 arm → ready → CPU run → stop/export 的流程并实板验收，再增加后端选择与采集清单保存。当前 Web 仍使用 Kingst，PXLogic 工具仅提供命令行采集与离线转换。
 
 ```powershell
 # 复现：PXLogic 采集 → 与 Kingst 完全相同的 DDR 提取（本机已跑通）
@@ -148,16 +156,14 @@ phase0: 2 bytes，FSYNC 候选 0
 ## 6. 测试
 
 ```powershell
-python -X utf8 -m unittest tools.tests.test_pxlogic_la -v     # 11 项，全绿
+python -X utf8 -m unittest tools.tests.test_pxlogic_la -v     # 23 项
 ```
 
 覆盖：采样率/时长/通道解析、位打包位序、跳变序号语义、**末字节补齐不产生假跳变**（回归）、
 CSV 往返一致性（逐通道跳变时刻对齐位流）、以及**合成 DDR 波形经 CSV 交给 `trace_port.extract`
 必须还原出原始载荷**（证明 PXLogic 采集能走通既有解码链，不需要硬件）。
 
-全套 `discover -s tools\tests` 在本 worktree 有 5 项失败，全部是**本 worktree 缺被 gitignore 的数据**
-（`decoded/500m/decoded.json`、`records/*/capture.kvdat`、`captures/trace-*.csv`、同级 `web-serial-rtt-tools`），
-与本次改动无关。
+完整回归须在集成目录执行：独立 worktree 不包含忽略的采集/解码记录和完整 SDK，相关数据依赖测试会缺少输入。
 
 ## 7. 尚未验证（明确保留）
 

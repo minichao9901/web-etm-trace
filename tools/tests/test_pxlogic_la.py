@@ -5,10 +5,16 @@
 最后交给 tools/trace_port.py 的 DDR 提取，要求还原出同一份载荷。
 """
 import csv
+import contextlib
+import io
+import json
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'la'))
@@ -76,6 +82,13 @@ class ParseTests(unittest.TestCase):
 
 
 class BitPackingTests(unittest.TestCase):
+    def test_chunk_boundary_preserves_every_transition(self):
+        import random
+        rng = random.Random(103)
+        levels = [rng.randrange(2) for _ in range(8192 * 3 + 13)]
+        expected = [i for i in range(1, len(levels)) if levels[i] != levels[i - 1]]
+        self.assertEqual(px.transitions(pack(levels), len(levels)), expected)
+
     def test_transitions_are_one_based_sample_indices(self):
         # 样本 0..15：0 0 1 1 1 0 0 0 1 0 1 1 0 0 0 0
         levels = [0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0]
@@ -157,6 +170,24 @@ class TransitionCsvTests(unittest.TestCase):
 
 
 class RawDirTests(unittest.TestCase):
+    def test_export_missing_empty_old_or_unequal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            with self.assertRaises(SystemExit):
+                px.validate_export(directory, [0], time.time())
+            p = directory / 'channel_0.bin'
+            p.write_bytes(b'')
+            with self.assertRaises(SystemExit):
+                px.validate_export(directory, [0], time.time())
+            p.write_bytes(b'\x00')
+            os.utime(p, (1, 1))
+            with self.assertRaises(SystemExit):
+                px.validate_export(directory, [0], time.time())
+            p.write_bytes(b'\x00')
+            (directory / 'channel_1.bin').write_bytes(b'\x00\x00')
+            with self.assertRaises(SystemExit):
+                px.validate_export(directory, [0, 1], time.time())
+
     """Codex review 2026-10-13 P1：导出目录残留会被当成本次采集的结果。"""
 
     def test_old_bitstreams_are_refused_without_reuse(self):
@@ -194,6 +225,22 @@ class ReconcileTests(unittest.TestCase):
 
 
 class StatsTests(unittest.TestCase):
+    def test_reference_rate_does_not_assume_half_duty(self):
+        levels = [int(i % 8 < 2) for i in range(80)]
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory / 'channel_0.bin').write_bytes(pack(levels))
+            rate, error = px.verify_rate_from_reference(directory, 0, 1000, 8000, 80, .01)
+            self.assertEqual(rate, 8000)
+            self.assertEqual(error, 0)
+
+    def test_reference_requires_multiple_complete_cycles(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory / 'channel_0.bin').write_bytes(pack([0] * 10 + [1] * 10 + [0] * 10))
+            with self.assertRaises(SystemExit):
+                px.verify_rate_from_reference(directory, 0, 1000, 20000, 30, .01)
+
     def test_square_wave_frequency_and_duty(self):
         half = 5000
         levels = [1 if (i // half) % 2 else 0 for i in range(half * 40)]
@@ -205,6 +252,54 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(item['median_half_period_samples'], half)
         self.assertAlmostEqual(item['frequency_hz'], 1000.0, places=3)
         self.assertAlmostEqual(item['duty_percent'], 50.0, places=3)
+
+
+class CaptureProvenanceTests(unittest.TestCase):
+    def test_same_second_captures_keep_raw_and_use_verified_rate(self):
+        with tempfile.TemporaryDirectory() as name:
+            out = Path(name) / 'capture.csv'
+            args = px.build_parser().parse_args([
+                'capture', '--out', str(out), '--channels', '0', '--rate', '1000',
+                '--samples', '16', '--verify-hz', '100', '--verify-tolerance', '.2'])
+
+            def cli(_cli, command, *_args, **_kwargs):
+                if command[0] == 'export':
+                    raw = Path(command[command.index('--dir') + 1])
+                    (raw / 'channel_0.bin').write_bytes(b'\x0f\xf0')
+                return '', {'state': 'completed'}
+
+            with patch.object(px, 'find_cli', return_value='mock'), \
+                 patch.object(px, 'pick_device', return_value={'id': 0, 'is_hardware': True}), \
+                 patch.object(px, 'status', return_value={'state': 'completed', 'have_hardware_data': True}), \
+                 patch.object(px, 'run_cli', side_effect=cli), \
+                 patch.object(px, 'verify_rate_from_reference', return_value=(900, .1)), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                px.cmd_capture(args)
+                px.cmd_capture(args)
+
+            manifests = list(Path(name).glob('capture.pxlogic/*/capture.json'))
+            self.assertEqual(len(manifests), 2)
+            for path in manifests:
+                m = json.loads(path.read_text(encoding='utf-8'))
+                self.assertEqual(m['stale_removed'], [])
+                self.assertEqual(m['capture']['requested']['samples'], 16)
+                self.assertEqual(m['capture']['time_axis_rate_hz'], 900)
+                self.assertEqual(m['capture']['actual']['sample_rate_hz'], 900)
+                self.assertTrue(m['capture']['actual']['verified'])
+                self.assertAlmostEqual(m['transition_csv']['window_ms'], 16 / 900 * 1000)
+            _, tracks, _, _ = read_tracks(out)
+            self.assertAlmostEqual(tracks[0][0][0], 4 / 900, places=8)
+
+    def test_selftest_refuses_success_response_without_fresh_export(self):
+        with tempfile.TemporaryDirectory() as name:
+            (Path(name) / 'channel_0.bin').write_bytes(pack([i % 2 for i in range(100)]))
+            args = px.build_parser().parse_args(['selftest', '--dir', name])
+            with patch.object(px, 'find_cli', return_value='mock'), \
+                 patch.object(px, 'pick_device', return_value={'id': 0}), \
+                 patch.object(px, 'status', return_value={'state': 'completed', 'have_hardware_data': True}), \
+                 patch.object(px, 'run_cli', return_value=('', {})), \
+                 self.assertRaises(SystemExit):
+                px.cmd_selftest(args)
 
 
 if __name__ == '__main__':
