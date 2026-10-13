@@ -317,7 +317,7 @@ def channel_stats(directory: Path, channel: int, rate: int, samples: int | None 
 
 
 def print_stats(directory: Path, channels: list[int], rate: int, samples: int | None = None) -> dict:
-    print(f"采样率 {rate/1e6:g} MSa/s  目录 {directory}")
+    print(f"采样率 {rate/1e6:g} MSa/s（按请求值换算；PXView CLI 不回读实际采样率）  目录 {directory}")
     report = {}
     for channel in channels:
         if not (directory / f"channel_{channel}.bin").exists():
@@ -374,6 +374,64 @@ def cmd_export(args) -> int:
     return 0 if files else 2
 
 
+def prepare_raw_dir(directory: Path, reuse: bool) -> list[str]:
+    """准备导出目录并**保证里面不会有上一次采集的残留**。
+
+    🚨 为什么必须清：PXView 的 `export` 即使一个字节都没写也会返回 `exported` / 退出码 0，
+    所以「目录里已经有 channel_5.bin」这种残留会被误当成本次采集的结果
+    （Codex review 2026-10-13 的第一条）。
+    返回被删掉的旧文件名，便于写进清单。
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    stale = sorted(p.name for p in directory.glob("channel_*.bin"))
+    if stale:
+        if not reuse:
+            raise SystemExit(
+                f"目录 {directory} 里已有上次导出的 {stale}；不让新采集复用旧位流。\n"
+                f"换一个目录（默认每次采集用带时间戳的新目录），或用 --reuse-raw 明确允许覆盖。"
+            )
+        for name in stale:
+            (directory / name).unlink()
+    return stale
+
+
+def reconcile_samples(requested: int, padded: int, force: bool) -> int:
+    """核对导出容量与请求样本数，返回用于生成时间轴的真实样本数。
+
+    bin 按字节补齐，所以 padding ∈ [0,8) 属正常；超出这个范围说明设备没有按请求采集
+    （改过采样率/时长），此时**拒绝**继续：时间轴仍按请求采样率换算，若默默接受会把
+    错误的时间轴和溯源写成"已证实"（Codex review 2026-10-13 的第二条）。
+    """
+    padding = padded - requested
+    if 0 <= padding < 8:
+        return requested
+    if not force:
+        raise SystemExit(
+            f"导出容量 {padded} 与请求样本数 {requested} 不符（差 {padding}，正常只应有 0~7 个补齐位）。\n"
+            f"说明设备没有按请求的采样率/时长采集，此时按请求采样率换算的时间轴不可信。\n"
+            f"请核对采样率与时长；确实要用这批数据请加 --force（清单会记下不符）。"
+        )
+    return padded
+
+
+def verify_rate_from_reference(directory: Path, channel: int, expected_hz: float,
+                               requested_rate: int, samples: int, tolerance: float) -> tuple[float, float]:
+    """用采集里的已知频率参考反推实际采样率，返回 (实测采样率, 相对偏差)。
+
+    PXView CLI 不回读采样率，但只要捕获里有频率已知的信号（本机是 LA 自身 PWM0 = 1 kHz，
+    ETM 场景是目标板已知的 TRACECLK），就能从半周期样本数反推：
+        实测采样率 = 中位半周期样本数 × 2 × 已知频率
+    这样「容量与请求不符」是**采样率变了**还是**只是窗口长了一点**就能分开
+    （Codex review 2026-10-13 第二条要求区分 requested / actual）。
+    """
+    item = channel_stats(directory, channel, requested_rate, samples)
+    half = item["median_half_period_samples"]
+    if not half:
+        raise SystemExit(f"参考通道 CH{channel} 没有可用的半周期，无法反推采样率")
+    measured = half * 2 * expected_hz
+    return measured, abs(measured - requested_rate) / requested_rate
+
+
 def cmd_capture(args) -> int:
     cli = find_cli(args.cli)
     channels = parse_channels(args.channels or DEFAULT_CHANNELS)
@@ -384,10 +442,17 @@ def cmd_capture(args) -> int:
     expected = args.samples if args.samples is not None else round(rate * seconds)
 
     device = pick_device(cli, args.device, demo=args.demo, timeout=args.timeout)
-    raw = Path(args.raw_dir).resolve() if args.raw_dir else Path(
-        str(Path(args.out).resolve().with_suffix("")) + ".pxlogic"
-    )
-    raw.mkdir(parents=True, exist_ok=True)
+    out_path = Path(args.out).resolve()
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if args.raw_dir:
+        raw = Path(args.raw_dir).resolve()
+        stale = prepare_raw_dir(raw, reuse=args.reuse_raw)
+    else:
+        # 每次采集一个唯一目录，绝不和历史位流混在一起。
+        raw = Path(str(out_path.with_suffix("")) + ".pxlogic") / stamp
+        stale = prepare_raw_dir(raw, reuse=True)
+    if stale:
+        print(f"已清掉导出目录里的旧位流：{'、'.join(stale)}")
 
     command = ["capture", "--device", str(device.get("id")),
                "--channels", ",".join(str(c) for c in channels),
@@ -415,6 +480,7 @@ def cmd_capture(args) -> int:
                          f"原始输出：{text[:200]}")
 
     # 导出：binary（位打包，供解析与统计）＋ csv（可选，供人工查看）
+    export_started = time.time()
     run_cli(cli, ["export", "--format", "binary", "--dir", str(raw)], args.timeout, json_out=False)
     if args.with_csv:
         run_cli(cli, ["export", "--format", "csv", "--dir", str(raw),
@@ -423,17 +489,46 @@ def cmd_capture(args) -> int:
     missing = [c for c in channels if not (raw / f"channel_{c}.bin").exists()]
     if missing:
         raise SystemExit(f"导出缺少通道文件：{missing}（PXView 只导出已使能的通道）")
+    # 新鲜度：目录已清空过，再核对 mtime 确实属于本次导出。
+    stale_out = [p.name for p in sorted(raw.glob("channel_*.bin"))
+                 if p.stat().st_mtime < export_started - 1.0]
+    if stale_out:
+        raise SystemExit(f"这些位流的时间戳早于本次导出，判定为残留：{stale_out}")
+    sizes = {p.stat().st_size for p in raw.glob("channel_*.bin")}
+    if len(sizes) != 1:
+        raise SystemExit(f"各通道位流长度不一致：{sorted(sizes)}；导出不完整，拒绝使用。")
 
-    padded = (raw / f"channel_{channels[0]}.bin").stat().st_size * 8
-    if not 0 <= padded - expected < 8:
-        print(f"⚠ 导出容量 {padded} 与请求样本数 {expected} 不符（差 {padded - expected}），"
-              f"按导出容量处理；请核对采样率/时长是否被设备接受。")
-        expected = padded
+    padded = sizes.pop() * 8
+    requested_samples = (args.samples if args.samples is not None else round(rate * seconds))
+    rate_verified = False
+    measured_rate = None
+    if args.verify_hz:
+        measured_rate, deviation = verify_rate_from_reference(
+            raw, args.verify_channel, args.verify_hz, rate, padded, args.verify_tolerance)
+        print(f"采样率核对：参考 {args.verify_hz:g} Hz → 实测采样率 {measured_rate/1e6:.6f} MSa/s"
+              f"（请求 {rate/1e6:g} MSa/s，偏差 {deviation*100:.4f}%）")
+        if deviation > args.verify_tolerance:
+            raise SystemExit(
+                f"实测采样率 {measured_rate/1e6:.6f} MSa/s 与请求 {rate/1e6:g} MSa/s 偏差 "
+                f"{deviation*100:.4f}% 超过容差 {args.verify_tolerance*100:g}%，拒绝按请求值生成时间轴。"
+            )
+        rate_verified = True
+    expected = reconcile_samples(requested_samples, padded, force=args.force or rate_verified)
+    count_mismatch = padded != requested_samples
+    if count_mismatch:
+        if rate_verified:
+            print(f"采集窗口比请求长：实际 {padded} 样本，请求 {requested_samples} 样本"
+                  f"（+{(padded - requested_samples) / requested_samples * 100:.3f}%）；"
+                  f"按实际容量生成时间轴，采样率已用参考信号核对。")
+        else:
+            print(f"⚠ 导出容量 {padded} 与请求 {requested_samples} 样本不符，已由 --force 放行；"
+                  f"时间轴与溯源按请求采样率换算，不可当已证实（建议加 --verify-hz 用参考信号核对）。")
 
-    csv_path = Path(args.out).resolve()
+    csv_path = out_path
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     summary = write_transition_csv(raw, csv_path, channels, rate, samples=expected)
-    files = {p.name: {"bytes": p.stat().st_size, "sha256": sha256(p)}
+    files = {p.name: {"bytes": p.stat().st_size, "sha256": sha256(p),
+                      "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds")}
              for p in sorted(raw.glob("channel_*.bin"))}
     manifest = {
         "backend": "pxlogic",
@@ -443,15 +538,26 @@ def cmd_capture(args) -> int:
         "device": {"id": device.get("id"), "name": device.get("display_name"),
                    "driver": device.get("driver_name"), "usb_speed": device.get("usb_speed")},
         "capture": {
-            "channels": channels, "sample_rate_hz": rate, "requested_seconds": seconds,
-            "requested_samples": args.samples,
+            "channels": channels,
+            # 请求值与实际值必须分开：PXView CLI 没有回读采样率/样本数的子命令，
+            # 只能核对导出容量是否与请求相符，所以实际采样率**未证实**，
+            # 由它换算的时间轴与频率也只是「按请求值换算」，不能当已实测。
+            "requested": {"sample_rate_hz": rate, "seconds": seconds, "samples": args.samples},
+            "actual": {"samples": summary["samples"], "export_capacity_samples": padded,
+                       "sample_rate_hz": measured_rate, "verified": rate_verified,
+                       "count_mismatch": count_mismatch,
+                       "source": ("参考信号反推：中位半周期样本数 × 2 × 已知频率"
+                                  if rate_verified else
+                                  "PXView CLI 无采样率回读接口；只在导出容量与请求不符时判定设备未按请求采集")},
             "threshold_volts": args.threshold, "trigger": args.trigger,
             "trigger_effective": False,
             "wall_seconds": round(elapsed, 3),
-            "state": state, "sample_count": summary["samples"],
+            "state": state,
             "window_ms": round(summary["window_ms"], 6),
+            "rate_basis": "时间轴与频率按请求采样率换算",
         },
         "files": files,
+        "stale_removed": stale,
         "transition_csv": summary,
         "cli_commands": [f"pxview-cli {' '.join(command)}",
                          f"pxview-cli export --format binary --dir {raw}"],
@@ -462,6 +568,17 @@ def cmd_capture(args) -> int:
     print(f"  跳变 CSV：{csv_path}")
     print(f"  原始位流：{raw}（{'、'.join(files)}）")
     print(f"  采集清单：{raw / 'capture.json'}")
+    if count_mismatch:
+        if rate_verified:
+            print(f"  采集窗口比请求长（{padded} vs {requested_samples} 样本），已按实际容量生成时间轴。")
+        else:
+            print("⚠ 导出容量与请求样本数不符（--force 已放行）：时间轴按请求采样率换算，不可当已证实。")
+    if rate_verified:
+        print(f"  采样率已核对：参考 {args.verify_hz:g} Hz → {measured_rate/1e6:.6f} MSa/s"
+              f"（清单 actual.verified=true）。")
+    else:
+        print("  说明：PXView CLI 不回读采样率，时间轴与频率按**请求值**换算"
+              "（清单里 actual.verified=false；可加 --verify-hz 用参考信号核对）。")
     if args.stats:
         print()
         print_stats(raw, channels, rate, expected)
@@ -594,7 +711,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threshold", type=float, default=1.65, help="数字阈值电压（V）")
     p.add_argument("--trigger", help="触发，格式 通道:类型（当前 PXView CLI 不生效，见文件头说明）")
     p.add_argument("--out", required=True, help="跳变 CSV 输出路径")
-    p.add_argument("--raw-dir", help="位流目录，默认 <out 同目录>/<文件名>.pxlogic/")
+    p.add_argument("--raw-dir", help="位流目录；默认 <out 同名>.pxlogic/<时间戳>/（每次采集一个新目录）")
+    p.add_argument("--reuse-raw", action="store_true",
+                   help="允许复用 --raw-dir 并先清掉里面的旧 channel_*.bin；不给就拒绝复用")
+    p.add_argument("--force", action="store_true",
+                   help="导出容量与请求样本数不符时仍继续（清单会记 count_mismatch，时间轴不可当已证实）")
+    p.add_argument("--verify-hz", type=float,
+                   help="用采集里频率已知的信号核对实际采样率，如 LA 自身 PWM0=1000 或目标 TRACECLK")
+    p.add_argument("--verify-channel", type=int, default=0, help="参考信号所在通道，默认 0")
+    p.add_argument("--verify-tolerance", type=float, default=0.01,
+                   help="实测采样率与请求值的最大相对偏差，默认 1%%")
     p.add_argument("--with-csv", action="store_true", help="同时导出 PXView 的逐样本 CSV（每通道一个大文件）")
     p.add_argument("--stats", action="store_true", help="采集后打印通道统计")
     p.set_defaults(func=cmd_capture)

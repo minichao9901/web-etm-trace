@@ -156,6 +156,43 @@ class TransitionCsvTests(unittest.TestCase):
                 px.write_transition_csv(directory, directory / 'x.csv', CHANNELS, RATE)
 
 
+class RawDirTests(unittest.TestCase):
+    """Codex review 2026-10-13 P1：导出目录残留会被当成本次采集的结果。"""
+
+    def test_old_bitstreams_are_refused_without_reuse(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory / 'channel_0.bin').write_bytes(pack([0] * 16))
+            with self.assertRaises(SystemExit):
+                px.prepare_raw_dir(directory, reuse=False)
+
+    def test_old_bitstreams_are_removed_with_reuse(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory / 'channel_0.bin').write_bytes(pack([0] * 16))
+            (directory / 'channel_3.bin').write_bytes(pack([1] * 16))
+            (directory / 'keep.txt').write_text('x', encoding='utf-8')
+            removed = px.prepare_raw_dir(directory, reuse=True)
+            self.assertEqual(removed, ['channel_0.bin', 'channel_3.bin'])
+            self.assertEqual(list(directory.glob('channel_*.bin')), [])
+            self.assertTrue((directory / 'keep.txt').exists())      # 只清位流，不动别的文件
+
+
+class ReconcileTests(unittest.TestCase):
+    """Codex review 2026-10-13 P1：容量与请求不符时不能默默改用别的时间轴。"""
+
+    def test_byte_padding_within_one_byte_is_accepted(self):
+        for padding in range(8):
+            self.assertEqual(px.reconcile_samples(1000, 1000 + padding, force=False), 1000)
+
+    def test_bigger_mismatch_is_rejected_by_default(self):
+        with self.assertRaises(SystemExit):
+            px.reconcile_samples(1000, 2000, force=False)
+
+    def test_force_accepts_but_reports_exported_capacity(self):
+        self.assertEqual(px.reconcile_samples(1000, 2000, force=True), 2000)
+
+
 class StatsTests(unittest.TestCase):
     def test_square_wave_frequency_and_duty(self):
         half = 5000

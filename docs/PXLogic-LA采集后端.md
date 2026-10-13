@@ -4,6 +4,24 @@
 入口：`tools/la/pxlogic_la.py`（Python，纯标准库；通过 subprocess 调 `C:\Program Files\PXView\pxview-cli.cmd`）。
 目的：让 **PXLogic 与 Kingst 成为两个可互换的 LA 后端**，在文件层收敛到同一份跳变 CSV，既有解码链不用改。
 
+## 0. 溯源纪律（按 Codex review 2026-10-13 修正）
+
+CLI 读不到设备实际采样率，所以工具**不把请求值当已实测**：
+
+- 清单里 `capture.requested` 与 `capture.actual` 分开；`actual.verified=false` 时，时间轴与频率都只是
+  「按请求采样率换算」，不能当已证实；
+- 导出容量与请求样本数不符（差不在 0~7 个补齐位内）时**默认拒绝**，给出 `--force`（放行但记 `count_mismatch`）
+  和 `--verify-hz`（用采集里已知频率的参考信号反推实际采样率，通过则 `actual.verified=true`）两条明确出路；
+- 每次采集用**唯一目录**（`<out 同名>.pxlogic/<时间戳>/`）；`--raw-dir` 指向已有目录时默认拒绝，
+  `--reuse-raw` 才允许并先清掉里面的旧 `channel_*.bin`；导出后还会核对每个文件的 mtime 属于本次导出、
+  各通道长度一致，避免把上次波形当本次结果；
+- 清单记录每个 bin 的字节数、SHA256、mtime 与 `stale_removed`。
+
+已知设备行为（实测，原因未在 CLI 层查明，故只记事实）：10 MSa/s 下 1 ms / 5 ms 窗口分别返回
+**10,048 / 50,048** 样本（比请求多 48），而 10 MSa/s 的 20 ms / 100 ms 与 500 MSa/s 的 2 ms / 10 ms
+精确相符。用 `--verify-hz 1000`（CH0 接 LA 自身 PWM0）核对：实测采样率 10.000000 MSa/s、偏差 0.0000%，
+即**采样率没变，只是窗口长了一点**——这正是 `--verify-hz` 存在的意义。
+
 ## 1. 为什么这样做
 
 Kingst 那条路是「外部程序采集 → 导出跳变 CSV → Python 解析」。PXLogic 采用同样形态，只是外部程序换成
@@ -32,6 +50,9 @@ python -X utf8 tools\la\pxlogic_la.py devices --json
 python -X utf8 tools\la\pxlogic_la.py capture `
   --channels 0,1,2,3,4 --rate 500M --time 2ms --threshold 1.5 `
   --out captures\f103ze-pxlogic.csv --stats
+# 有已知频率参考时顺带核对实际采样率（本机 CH0 = LA 自身 PWM0 = 1 kHz）
+python -X utf8 tools\la\pxlogic_la.py capture --channels 0 --rate 10M --time 1ms `
+  --out captures\ref.csv --verify-hz 1000 --stats
 
 # 已知信号自检（CH0 接 LA 自身 PWM0：1 kHz、50%），失败返回非 0，可当验收脚本
 python -X utf8 tools\la\pxlogic_la.py selftest --rate 10M --time 100ms
@@ -49,10 +70,12 @@ python -X utf8 tools\la\pxlogic_la.py stats captures\raw --rate 500M --samples 1
 | 产物 | 说明 |
 |---|---|
 | `<out>.csv` | 与 Kingst 同构的跳变 CSV（UTF-8 BOM，表头 `Time[s], 通道 N`），直接喂 `tools/trace_port.py` |
-| `<out 同名>.pxlogic/channel_N.bin` | PXView 原始位打包位流，8 样本/字节、LSB-first、逐通道、无文件头 |
-| `<out 同名>.pxlogic/capture.json` | 采集清单：设备、采样率、阈值、样本数、窗口、各文件 SHA256、实际用过的命令行 |
+| `<out 同名>.pxlogic/<时间戳>/channel_N.bin` | PXView 原始位打包位流，8 样本/字节、LSB-first、逐通道、无文件头 |
+| `<out 同名>.pxlogic/<时间戳>/capture.json` | 采集清单：设备、请求/实际采样率与样本数、阈值、各文件 SHA256 与 mtime、`stale_removed`、实际用过的命令行 |
 
-`--raw-dir` 可把位流目录指到别处；`--with-csv` 额外导出 PXView 的逐样本 CSV（每通道一个大文件，仅人工查看用）。
+`--raw-dir` 可把位流目录指到别处（已有旧位流时默认拒绝，加 `--reuse-raw` 才清空复用）；
+`--with-csv` 额外导出 PXView 的逐样本 CSV（每通道一个大文件，仅人工查看用）；
+`--force` / `--verify-hz` 见第 0 节。
 
 ## 3. 本机实测结论（不是推测）
 
