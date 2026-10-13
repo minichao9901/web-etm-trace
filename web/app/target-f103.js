@@ -24,7 +24,7 @@ export async function stopF103(t){
   await programming(t);
 }
 
-export async function configureF103(t,{traceid=2,returnStack=false,cycleCount=false,pinSpeed=3}={}){
+export async function configureF103(t,{traceid=2,branchBroadcast=false,returnStack=false,cycleCount=false,pinSpeed=3}={}){
   if(returnStack||cycleCount)throw Error('F103 ETM-M3 未实现返回栈压缩/周期准确模式；请取消这些选项');
   if(pinSpeed!==3)throw Error('F103ZE 当前验收要求 50 MHz 高速 GPIO 输出');
   await t.halt();await t.inspect();
@@ -47,8 +47,11 @@ export async function configureF103(t,{traceid=2,returnStack=false,cycleCount=fa
   await t.set(DBG,0xe0,0xe0);
   await t.set(0xe0000e80,0x7fffff,0x1000d);
   await t.set(0xe0001000,1,1);
-  // M3 ETMCR bit12 and bit29 are reserved. Bit8 broadcasts branch addresses.
-  await t.set(F103_ETM,0x10000b80,0x100);
+  // Keep branch broadcast off: forcing every direct branch address overflowed
+  // the CDC initialization at both 72/36 and 48/24 MHz. Direct branches are
+  // reconstructed from the matched ELF; no address/time filter or CPU stall.
+  // M3 ETMCR bit12 and bit29 are reserved.
+  await t.set(F103_ETM,0x10000b80,branchBroadcast?0x100:0);
   await t.set(F103_ETM,0xc00,0x800);
   await t.wait(F103_ETM+0x10,2,0);
   const info=await t.inspect();

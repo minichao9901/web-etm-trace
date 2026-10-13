@@ -8,7 +8,7 @@
  *   已在同一块板上验证可枚举）为基底，**只做三处改动**：
  *     1) USB 类：class/msc → class/cdc（用 CherryUSB demo/cdc_acm_template.c 改写）
  *     2) 时钟/GPIO/UART 初始化：直接沿用参考工程 main.c 的 SystemClock_Config / MX_GPIO_Init
- *        （HSE 8MHz × PLL9 = 72MHz，USB 预分频 1.5 → 48MHz）
+ *        （ZE 默认 HSE 8MHz × PLL6 = 48MHz；CB 及显式对照档 PLL9 = 72MHz，USB 均为 48MHz）
  *     3) 增加 etm-trace 钩子（SEGGER RTT 日志 + DWT 打点），删掉 MSC/flash_fat16/DFU 相关文件
  *   USB 底层（usb_dc_fsdev.c / usb_fsdev_reg.h / usb_glue_st.c / usb_config.h）保持原样，
  *   唯一额外的构建前准备是 tools/prep.ps1（解开 ST 启动文件对 USB 中断的弱别名锁定，
@@ -28,6 +28,13 @@
 #include "cdc_console.h"
 #include "SEGGER_RTT.h"
 #include "trace_workload.h"
+
+#if defined(TRACE_CPU_48MHZ) && defined(TRACE_CPU_72MHZ)
+#error "Choose only one CPU clock profile"
+#endif
+#if defined(STM32F103xE) && !defined(TRACE_CPU_72MHZ) && !defined(TRACE_CPU_48MHZ)
+#define TRACE_CPU_48MHZ
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -318,7 +325,8 @@ void SystemClock_Config(void)
     RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
     RCC_PeriphCLKInitTypeDef PeriphClkInit = { 0 };
 
-    /* HSE 8MHz × PLL9 = 72MHz, or × PLL6 = 48MHz for signal-margin trials. */
+    /* F103ZE defaults to PLL6: CPU/HCLK 48 MHz, TRACECLK 24 MHz, USB 48 MHz.
+     * PLL9 remains available as an explicit 72/36 MHz comparison build. */
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
     RCC_OscInitStruct.HSEState = RCC_HSE_ON;
     RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;

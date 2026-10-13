@@ -200,3 +200,6 @@
   #etm-app .history-tools{flex-wrap:wrap}
   #etm-app .control label>input:not([type=checkbox]),#etm-app .control label>select{width:150px}
 }
+
+#etm-app .trace-option-checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:8px}
+#etm-app .trace-option-checks label{justify-content:flex-start;margin:4px 0;gap:5px}

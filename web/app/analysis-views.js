@@ -1,5 +1,6 @@
 import {rangeFromPixels,wheelRange} from './execution-window.js';
 import {createZoomControls} from './zoom-controls.js';
+import {traceSettingsText} from './trace-options.js';
 const make=(tag,text,className='')=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;e.className=className;if(className.split(/\s+/).includes('hint')&&text!==undefined)e.title=String(text);return e;};
 const n=value=>Number(value).toLocaleString('zh-CN');
 
@@ -10,6 +11,8 @@ export function integrityView(result){
   rows[0][0]='OpenCSD 已处理';rows.unshift(['ETM 原始输入',`${n(q.inputBytes??q.processedBytes)} 字节`],['未处理输入',`${n(q.unprocessedBytes??0)} 字节`]);
   if(physical){rows.push(['物理时钟段',`${physical.clock_runs?.length??1} 段`],['长时钟间隔',`${physical.clock_gaps?.length??0} 处`],['最小数据跳变距离',`${physical.min_data_transition_distance_ns?.toFixed(3)??'—'} ns`]);}
   const snapshot=result.targetSnapshot;
+  rows.push(['尾部同步标记残片',`${q.trailingSyncBytes??0} 字节（保留为捕获边界）`]);
+  rows.push(['ETM 选项（配置快照）',traceSettingsText(result.config||snapshot?.config)]);
   const filter=result.laFilter;
   if(filter?.channels){const active=filter.channels.filter(x=>x.enabled);rows.push(['LA 毛刺滤波快照',active.length?active.map(x=>`CH${x.channel} ≤${x.samples} 点 (${x.widthNs?.toFixed(1)??'—'} ns)`).join('；'):'全部关闭']);}
   else rows.push(['LA 毛刺滤波快照','未记录，不能由磁盘预设推断']);

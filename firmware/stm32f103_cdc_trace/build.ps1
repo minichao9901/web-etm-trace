@@ -2,7 +2,8 @@
 #
 # 用法：
 #   pwsh -NoProfile -File .\build.ps1                 # 默认 -Chip cb（在线板 F103CB/R8，64K/20K）
-#   pwsh -NoProfile -File .\build.ps1 -Chip ze        # 目标板 F103ZE，512K/64K（带 ETM）
+#   pwsh -NoProfile -File .\build.ps1 -Chip ze        # F103ZE，默认 CPU 48 / TRACECLK 24 MHz
+#   pwsh -NoProfile -File .\build.ps1 -Chip ze -CpuMHz 72 # 72/36 MHz 对照档 fw-ze-72.*
 #
 # 产物：build\<chip>\fw.{elf,bin,hex}，并在根目录放 fw-<chip>.* 副本。
 # 本脚本**只编译不烧录**；烧录用 flash.ps1。
@@ -16,6 +17,8 @@ param(
     [switch]$TraceWorkload
 )
 $ErrorActionPreference = 'Stop'
+$explicitCpuMHz = $PSBoundParameters.ContainsKey('CpuMHz')
+if ($Chip -eq 'ze' -and -not $explicitCpuMHz) { $CpuMHz = 48 }
 if ($StandaloneEtm -and $Chip -ne 'ze') { throw '独立 ETM 模式仅支持 F103ZE' }
 Import-Module (Join-Path $PSScriptRoot '..\tools\BuildTools.psm1') -Force
 
@@ -24,7 +27,8 @@ if (-not $Gcc) { $Gcc = (Get-Command arm-none-eabi-gcc).Source }
 $bin  = Split-Path -Parent $Gcc
 $sdk  = Join-Path $root 'sdk\Drivers'
 $variant = if ($StandaloneEtm) { "$Chip-standalone" } else { $Chip }
-if ($CpuMHz -ne 72) { $variant += "-$CpuMHz" }
+if (($CpuMHz -eq 48 -and ($explicitCpuMHz -or $StandaloneEtm -or $TraceWorkload)) -or
+    ($Chip -eq 'ze' -and $CpuMHz -eq 72)) { $variant += "-$CpuMHz" }
 if ($TraceWorkload) { $variant += '-workload' }
 $out  = Join-Path $root "build\$variant"
 New-Item -ItemType Directory -Path $out -Force | Out-Null
@@ -63,6 +67,7 @@ $flags = @(
 )
 if ($StandaloneEtm) { $flags += '-DTRACE_ETM_STANDALONE' }
 if ($CpuMHz -eq 48) { $flags += '-DTRACE_CPU_48MHZ' }
+else { $flags += '-DTRACE_CPU_72MHZ' }
 if ($TraceWorkload) { $flags += '-DTRACE_PATH_WORKLOAD' }
 
 # ---------- 源文件 ----------

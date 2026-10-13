@@ -2,6 +2,37 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EtmTarget} from '../../web/app/target.js';
 import {decodeClocks,targetPort} from '../../web/app/clock.js';
+import {traceCapabilities} from '../../web/app/trace-options.js';
+
+function h7Configuration(idr0=0x80006e1){
+  const t=new EtmTarget(),mem=new Map([[0xe0041010,0x801],[0xe004103c,0x123]]),writes=[];
+  t.traceFamily='h7';t.halt=async()=>{};t.wait=async()=>{};t.unlock=async()=>{};
+  t.read=async a=>{if(a===0xe004103c&&(idr0&0x18)!==0x18)throw Error('unimplemented BBCTLR');return mem.get(a)||0;};
+  t.write=async(a,v)=>{mem.set(a,v>>>0);writes.push([a,v>>>0]);};
+  t.inspect=async()=>{t.info={profile:'stm32h7b0',traceSupported:true,config:{idr0,config:mem.get(0xe0041010)},traceOptions:traceCapabilities('stm32h7b0',{idr0}),clocks:{traceReady:true}};return t.info;};
+  return {t,mem,writes};
+}
+
+test('H7 branch broadcast maps to CONFIGR bit 3, preserves other bits and avoids absent BBCTLR',async()=>{
+  const {t,mem,writes}=h7Configuration();try{
+    await t.configure({branchBroadcast:true,returnStack:true,cycleCount:true});
+    assert.equal(mem.get(0xe0041010),0x1819);assert.ok(writes.every(([a])=>a!==0xe004103c));
+    await t.configure({branchBroadcast:false});assert.equal(mem.get(0xe0041010),0x801);
+  }finally{t.bus.close();}
+});
+
+test('H7 unsupported options are rejected before configuration writes',async()=>{
+  for(const option of ['branchBroadcast','returnStack','cycleCount']){
+    const {t,writes}=h7Configuration(0);try{await assert.rejects(t.configure({[option]:true}),/未实现/);assert.equal(writes.length,0);}finally{t.bus.close();}
+  }
+});
+
+test('H7 data-trace implementation uses unrestricted BBCTLR only when broadcast is selected',async()=>{
+  const {t,mem}=h7Configuration(0x80006f9);try{
+    await t.configure({branchBroadcast:true});assert.equal(mem.get(0xe004103c),0);
+    assert.equal(t.saved.get(0xe004103c).before,0x123);
+  }finally{t.bus.close();}
+});
 
 test('PLL P and R distinguish CPU, HCLK and physical trace clocks',()=>{
   const registers={cr:(1<<17)|(1<<25),cfgr:3|(3<<3),domain:8,pllSource:2|(5<<4),pllConfig:(1<<16)|(1<<18),pllDiv:111|(1<<9)|(2<<16)|(3<<24),pllFrac:0};

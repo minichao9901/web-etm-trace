@@ -17,7 +17,7 @@ def demux(raw):
     current = None
     streams = {}
     stats = dict(frames=0, fsyncs=0, hsyncs=0, errors=0, unknown_bytes=0,
-                 initial_skipped_bytes=skipped, id_changes=[])
+                 initial_skipped_bytes=skipped, id_changes=[], trailing_sync_bytes=0)
 
     def emit(source, value):
         if source is None:
@@ -25,7 +25,16 @@ def demux(raw):
         else:
             streams.setdefault(source, bytearray()).append(value)
 
-    while position + 2 <= len(raw):
+    while position < len(raw):
+        # A capture may end 1..3 bytes into FSYNC at a frame boundary.
+        # Keep that fragment as an explicit boundary; never treat it as an ID
+        # or ignore a full/partial sync in the middle of a frame.
+        remaining = len(raw) - position
+        if not frame and remaining < len(FSYNC) and raw[position:] == FSYNC[:remaining]:
+            stats['trailing_sync_bytes'] = remaining
+            break
+        if position + 2 > len(raw):
+            break
         if not frame and raw[position:position + 4] == FSYNC:
             stats['fsyncs'] += 1
             position += 4

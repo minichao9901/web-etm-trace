@@ -8,9 +8,10 @@
 # 注意：只写 Flash 并复位，不做整片擦除之外的破坏性操作。
 param(
     [ValidateSet('cb', 'ze')][string]$Chip = 'cb',
-    [string]$Target = 'stm32f103cb'
+    [string]$Target
 )
 $ErrorActionPreference = 'Stop'
+if (-not $Target) { $Target = if ($Chip -eq 'ze') { 'stm32f103ze' } else { 'stm32f103cb' } }
 
 $root = $PSScriptRoot
 $binFile = Join-Path $root "fw-$Chip.bin"
@@ -24,6 +25,7 @@ Write-Output "烧录 $binFile -> $Target @0x08000000"
 if ($LASTEXITCODE -ne 0) { throw "烧录失败（exit $LASTEXITCODE）" }
 
 & $pyocd reset -t $Target
+if ($LASTEXITCODE -ne 0) { throw "复位失败（exit $LASTEXITCODE）" }
 Write-Output "已复位。建议随后："
 Write-Output "  1) 等 5~8 秒让 Windows 枚举（首次可能要清一次设备管理器里的坏节点）"
 Write-Output "  2) python .\tools\min_probe.py --target $Target --read 0x20004fc0:56"

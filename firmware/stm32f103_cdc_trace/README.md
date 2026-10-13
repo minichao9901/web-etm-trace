@@ -6,6 +6,20 @@
 > （PING/INFO/MARK/ECHO/未知命令/原始回环）；`INFO` 返回 `sysclk=72000000Hz clk_err=0`。
 > 注：首次插上若 Windows 里有旧的坏节点（`VID_0000&PID_0002`），先在设备管理器卸载它再插拔一次。
 
+
+## F103ZE 当前默认档（2026-10-13）
+
+`build.ps1 -Chip ze` 现在生成 **CPU/HCLK 48 MHz、引脚 TRACECLK 24 MHz** 的 `fw-ze.elf/.bin/.hex`；
+USB 时钟仍为 48 MHz（PLL 直接供 USB，Flash 1 等待周期）。CB 默认 72 MHz 不变。
+显式对照档 `build.ps1 -Chip ze -CpuMHz 72` 生成 `fw-ze-72.*`，不会覆盖默认 48 MHz 固件。
+显式 `-CpuMHz 48 -TraceWorkload` 继续生成 `fw-ze-48-workload.*`。
+
+本例普通固件不自行开启 ETM。网页负责 ETM/TPIU，**分支广播默认关闭**。
+相同 CDC 初始化起点、500 MSa/s、10 ms 实测：原 72/36 MHz + 广播开为 63 次 overflow；
+48/24 MHz + 广播开为 16 次；48/24 MHz + 广播关连续三轮均为 0。
+仅降频不足以保证无 overflow，业务负载和 Trace 选项同样影响输出量。
+详见 [F103ZE-CDC-48MHz与ETM选项验收](../../docs/F103ZE-CDC-48MHz与ETM选项验收.md)。
+
 **基底**：你提供的参考工程 `cherry_drag_n_drop_bootloader_fat16`（MSC 拖拽 IAP，已在同一块板验证可枚举）。
 本工程**只做三处改动**，USB 底层一行没动：
 
@@ -28,11 +42,11 @@ CDC 类文件来自 CherryUSB v1.6.1 的 `class/cdc/`（v1.5.2 里没有 CDC 类
 
 ```powershell
 pwsh -NoProfile -File .\build.ps1              # 在线板 F103CB/R8（64K Flash / 20K RAM）
-pwsh -NoProfile -File .\build.ps1 -Chip ze     # 目标板 F103ZE（512K/64K，带 ETM）
+pwsh -NoProfile -File .\build.ps1 -Chip ze     # F103ZE，默认 48/24 MHz，输出 fw-ze.*
 pwsh -NoProfile -File .\flash.ps1              # pyocd 烧录（换 -Chip ze）
 ```
 
-`build.ps1` 会自动先跑一次 `tools\prep.ps1`（幂等），**这一步不能省**（原因见第 3 节）。
+启动文件的 USB 向量补丁已随工程保留；如重新导入原始 SDK，请先运行 `tools\prep.ps1`（幂等）。`build.ps1` 不自动执行该准备脚本，构建后会自检 USB 向量。
 
 实测占用：`text 19292 + data 140 = 19432` 字节 Flash，`bss 5372` 字节 RAM（F103CB 够用）。
 
@@ -138,8 +152,8 @@ python .\tools\fault_dump.py --target stm32f103cb     # 跑飞时定位故障指
 | 项 | 值 |
 |---|---|
 | HSE | 8 MHz（`HSE_VALUE=8000000`） |
-| SYSCLK | 72 MHz（PLL ×9） |
-| USB 时钟 | 48 MHz（`RCC_USBCLKSOURCE_PLL_DIV1_5`） |
+| SYSCLK | ZE 默认 48 MHz（PLL ×6）；CB / ZE 对照档 72 MHz（PLL ×9） |
+| USB 时钟 | 恒为 48 MHz：48 MHz 档 PLL /1，72 MHz 档 PLL /1.5 |
 | USB 引脚 | PA11=DM，PA12=DP，全速，内部 1.5k 上拉 |
 | 打点脚 | PA1（`trace_hook_mark` 翻转）；PA0 保留给参考工程原有的输入用途 |
 

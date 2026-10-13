@@ -27,6 +27,22 @@ class TpiuDemuxTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             demux(FSYNC + b'\x05\x11' + FSYNC)
 
+    def test_partial_final_sync_is_preserved_as_capture_boundary(self):
+        frame = bytes.fromhex('05 ab 10 22 24 44 36 66 48 88 5a aa 6c cc 7e aa')
+        complete, expected = demux(FSYNC + frame)
+        for length in (1, 2, 3):
+            stats, streams = demux(FSYNC + frame + FSYNC[:length])
+            self.assertEqual(streams, expected)
+            self.assertEqual(stats['frames'], complete['frames'])
+            self.assertEqual(stats['errors'], 0)
+            self.assertEqual(stats['trailing_sync_bytes'], length)
+            self.assertEqual(stats['trailing_raw_bytes'], length)
+
+    def test_partial_sync_does_not_hide_broken_frame_or_internal_sync(self):
+        for raw in (FSYNC + b'\x05\x11' + FSYNC[:2], FSYNC + FSYNC[:3] + b'\x00\x00' + FSYNC):
+            with self.assertRaises(ValueError):
+                demux(raw)
+
 
 if __name__ == '__main__':
     unittest.main()

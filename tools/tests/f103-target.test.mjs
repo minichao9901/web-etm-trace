@@ -24,7 +24,7 @@ test('F103ZE reads v3 capability and 48/24 clocks; unsupported ETM ID fails',asy
 test('F103 configure/restore never writes H7 or switches TPIU to SWO and restores GPIO bits',async()=>{
   const {t,writes,mem}=target();try{
     await t.configure();assert.equal(mem.get(0x40011800)&0x0fffff00,0x0bbbbb00);
-    assert.equal(mem.get(0xe0040004),8);assert.equal(mem.get(0xe0041200),2);assert.equal(mem.get(0xe0041000),0x910);
+    assert.equal(mem.get(0xe0040004),8);assert.equal(mem.get(0xe0041200),2);assert.equal(mem.get(0xe0041000),0x810);
     const out=mem.get(0x40011800)^0x80000000;mem.set(0x40011800,out>>>0);
     await t.restore();assert.equal(mem.get(0x40011800),((out&~0x0fffff00)|(0x44444444&0x0fffff00))>>>0);
     assert.equal(mem.get(0xe0041000),0x411);assert.equal(mem.get(0xe00400f0),0);
@@ -34,6 +34,14 @@ test('F103 configure/restore never writes H7 or switches TPIU to SWO and restore
 test('F103 reserved return stack/cycle options fail before configuring trace',async()=>{
   const {t,writes}=target();try{await assert.rejects(t.configure({returnStack:true}),/未实现/);
     assert.ok(writes.every(([a])=>a!==0xe0041000));
+  }finally{t.bus.close();}
+});
+test('F103 branch broadcast checkbox maps to bit 8 and restores its original value',async()=>{
+  const {t,mem}=target();try{
+    await t.configure({branchBroadcast:true});assert.equal(mem.get(0xe0041000),0x910);
+    assert.equal(t.info.traceOptions.branchBroadcast,true);
+    await t.configure({branchBroadcast:false});assert.equal(mem.get(0xe0041000),0x810);
+    await t.restore();assert.equal(mem.get(0xe0041000),0x411);
   }finally{t.bus.close();}
 });
 test('inspection failure restores only the acquired DEMCR lease without programming an unknown ETM',async()=>{

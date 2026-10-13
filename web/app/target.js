@@ -5,6 +5,7 @@ import {Breakpoints} from './breakpoints.js';
 import {withCleanup} from './operation.js';
 import {decodeFpCtrl,encodeComparator,canBreak,compAddr} from './shared/dbg/bp.js';
 import {inspectF103,stopF103,configureF103,restoreF103} from './target-f103.js';
+import {traceCapabilities} from './trace-options.js';
 
 const ETM=0xe0041000,FUNNEL=0x5c013000,ETF=0x5c014000,TPIU=0x5c015000;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -120,7 +121,7 @@ export class EtmTarget {
     this.breakpoints.capacity=decodeFpCtrl(await this.read(0xe0002000)).numCode;
     this.info={cpuid,device,profile:port.id,name:port.name,core:port.core,etmVersion:port.etmVersion,traceSupported,
       traceStatus:traceSupported?port.id==='stm32f103ze'?'F103ZE 48/24 MHz Kingst 联动与 ETMv3 解码已验收；封装须有 PE2～PE6':'H7B0 70/35 MHz 已验收；同组其他型号仍需实测':'型号/时钟/断点可用；本型号 trace 配置与解码尚未验收',
-      flashLimit:port.id==='stm32h7b0'?0x08020000:port.flashLimit,traceOptions:{returnStack:port.id==='stm32h7b0',cycleCount:port.id==='stm32h7b0'},
+      flashLimit:port.id==='stm32h7b0'?0x08020000:port.flashLimit,traceOptions:traceCapabilities(port.id,config),
       config,halted:await this.isHalted(),rcc,clocks,clockError,hseHz:this.hseHz,width};return this.info;
   }
 
@@ -210,11 +211,14 @@ export class EtmTarget {
     for(const segment of info.segments){const expected=Uint8Array.from(atob(segment.data),c=>c.charCodeAt(0));for(let i=0;i<expected.length;i+=512){const length=Math.min(512,expected.length-i);let actual;try{actual=await this.probe.readMemDiagnostic((segment.address+i)>>>0,length);}catch(e){throw this.accessError(e,'校验 Flash',segment.address+i);}for(let j=0;j<length;j++)if(actual[j]!==expected[i+j])throw Error(`目标机器码与 ELF 不匹配：${hex(segment.address+i+j)}`);checked+=length;}}
     this.log(`ELF 校验通过：${checked} 字节目标 Flash 一致`);return checked;
   }
-  async configure({traceid=2,returnStack=false,cycleCount=false,pinSpeed=3}={}){
+  async configure({traceid=2,branchBroadcast=false,returnStack=false,cycleCount=false,pinSpeed=3}={}){
     await this.inspect();if(!this.info.traceSupported)throw Error(this.info.traceStatus);
     if(!Number.isInteger(traceid)||traceid<1||traceid>0x6f)throw Error('Trace ID 范围为 1~111');
     if(!Number.isInteger(pinSpeed)||pinSpeed<1||pinSpeed>3)throw Error('trace 引脚速度范围为 1~3');
-    if(this.info.profile==='stm32f103ze')return configureF103(this,{traceid,returnStack,cycleCount,pinSpeed});
+    if(this.info.profile==='stm32f103ze')return configureF103(this,{traceid,branchBroadcast,returnStack,cycleCount,pinSpeed});
+    for(const [option,enabled]of Object.entries({branchBroadcast,returnStack,cycleCount})){
+      if(enabled&&!this.info.traceOptions[option])throw Error('当前 ETM 未实现所选选项：'+option);
+    }
     await this.halt();await this.inspect();
     if(this.info.clockError)throw Error(this.info.clockError);if(!this.info.clocks.traceReady)throw Error('PLL1 R 输出没有启用，请由目标固件配置');
     await this.set(0x580244e0,1<<4,1<<4);
@@ -229,8 +233,11 @@ export class EtmTarget {
     if(!(await this.read(TPIU+0x300)&2)){await this.managed(TPIU+0x304,(await this.read(TPIU+0x304))|0x1040,false);await this.wait(TPIU+0x300,2,2);}
     await this.managed(TPIU+0x204,0);await this.managed(TPIU+4,8);await this.managed(TPIU+0x400,256,false);await this.managed(TPIU+0x304,3);
     // ETM-M7 CONFIGR bit 0 is RES1; preserve fixed bits (not INSTP0).
-    const fixed=(await this.read(ETM+0x10))&~0x1010;
-    await this.managed(ETM+0x10,fixed|(returnStack?1<<12:0)|(cycleCount?1<<4:0));
+    const fixed=(await this.read(ETM+0x10))&~0x1018;
+    await this.managed(ETM+0x10,fixed|(branchBroadcast?1<<3:0)|(returnStack?1<<12:0)|(cycleCount?1<<4:0));
+    // ETM-M7 instruction-only trace broadcasts across the whole memory map.
+    // BBCTLR exists only in instruction+data implementations (DDI0494D 3.4.11).
+    if(branchBroadcast&&(this.info.config.idr0&0x18)===0x18)await this.managed(ETM+0x3c,0);
     if(cycleCount)await this.managed(ETM+0x38,256);
     await this.managed(ETM+0x20,0);await this.managed(ETM+0x24,0);await this.managed(ETM+0x2c,0);
     await this.managed(ETM+0x40,traceid);await this.managed(ETM+0x88,0);await this.managed(ETM+0x8c,0);await this.managed(ETM+0x80,0x201);await this.managed(ETM+4,1);

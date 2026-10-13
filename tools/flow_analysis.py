@@ -101,8 +101,9 @@ def byte_accounting(result):
                 decoderLastError=result.get('status', {}).get('lastErrorCode', None),
                 unknownExecution=unknown_execution, initialPhysicalBytes=framing.get('initial_skipped_bytes'),
                 unknownSourceBytes=framing.get('unknown_bytes'), trailingFrameBytes=framing.get('trailing_frame_bytes'),
+                trailingSyncBytes=framing.get('trailing_sync_bytes',0),
                 firstPathOffset=next((e['offset'] for e in result['events'] if e['kind']=='instruction'), None),
-                boundaryPresent=bool(unknown or framing.get('initial_skipped_bytes') or framing.get('trailing_frame_bytes')),
+                boundaryPresent=bool(unknown or framing.get('initial_skipped_bytes') or framing.get('trailing_frame_bytes') or framing.get('trailing_sync_bytes')),
                 timing=dict(cycleElements=sum(e['type']==12 for e in result['elements']), timeFlameAvailable=False),
                 basis='字节核算不等于采集无损证明；源码映射率不等于程序覆盖率')
 

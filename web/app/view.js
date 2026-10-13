@@ -2,6 +2,7 @@ import {SourceStore} from './shared/dbg/source.js';
 import {readReferencedSources,sourceBatches} from './source-snapshot.js';
 import {withCleanup} from './operation.js';
 import {EtmTarget} from './target.js';
+import {traceSettings,traceSettingsText} from './trace-options.js';
 import {HistoryView} from './history.js';
 import {COMMON_TARGETS,completeClocks,targetPort} from './clock.js';
 const $=id=>document.getElementById(id),hex=n=>'0x'+(n>>>0).toString(16).padStart(8,'0'),sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -24,8 +25,8 @@ function controls(){const busy=state.operation||!!state.job,connected=!!target.p
   for(const b of document.querySelectorAll('.symbol-row button,.breakpoint-row button,.breakpoint-row input,#break-candidates button'))b.disabled=busy;
   $('target-profile').disabled=busy||connected;$('show-experiments').disabled=busy;
   $('save-record').disabled=!state.current;$('decode').disabled=!state.current||busy;$('export').disabled=!state.current;
-  for(const id of ['rate','duration','threshold','fraction','channels','hse','expected-cpu','expected-trace','sync','reset-before','entry-before','pin-speed','traceid','return-stack','cycles','auto-clock'])$(id).disabled=busy;
-  for(const [id,option]of [['return-stack','returnStack'],['cycles','cycleCount']])$(id).disabled=busy||target.info?.traceOptions?.[option]===false;
+  for(const id of ['rate','duration','threshold','fraction','channels','hse','expected-cpu','expected-trace','sync','reset-before','entry-before','pin-speed','traceid','branch-broadcast','return-stack','cycles','auto-clock'])$(id).disabled=busy;
+  for(const [id,option]of [['branch-broadcast','branchBroadcast'],['return-stack','returnStack'],['cycles','cycleCount']])$(id).disabled=busy||target.info?.traceOptions?.[option]===false;
   if(target.info?.profile==='stm32f103ze')$('pin-speed').disabled=true;
   $('reset-before').disabled=busy||!$('entry-before').checked;
   $('expected-cpu').disabled=busy||$('auto-clock').checked;$('expected-trace').disabled=busy||$('auto-clock').checked;
@@ -35,14 +36,14 @@ function controls(){const busy=state.operation||!!state.job,connected=!!target.p
 }
 function panel(name){for(const b of document.querySelectorAll('[data-panel]')){const active=b.dataset.panel===name;b.setAttribute('aria-selected',String(active));b.tabIndex=active?0:-1;$('panel-'+b.dataset.panel).hidden=!active;}document.querySelector('.sidebar-content').scrollTop=0;}
 for(const b of document.querySelectorAll('[data-panel]')){b.onclick=()=>panel(b.dataset.panel);b.onkeydown=e=>{const names=['target','clock','trace','files'],i=names.indexOf(b.dataset.panel);if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const next=e.key==='Home'?0:e.key==='End'?3:(i+(e.key==='ArrowLeft'?3:1))%4;panel(names[next]);$('tab-'+names[next]).focus();}};}
-function options(){return {traceid:Number($('traceid').value),returnStack:$('return-stack').checked,cycleCount:$('cycles').checked,pinSpeed:Number($('pin-speed').value)};}
+function options(){return {traceid:Number($('traceid').value),branchBroadcast:$('branch-broadcast').checked,returnStack:$('return-stack').checked,cycleCount:$('cycles').checked,pinSpeed:Number($('pin-speed').value)};}
 function updateTraceConfigState(info=target.info){
   const label=$('trace-config-state');if(!label)return;
-  label.textContent=state.traceConfigDirty?'待应用设置已修改；硬件当前值见“寄存器回读”':'输入框跟随最近一次硬件回读；修改后保留为待应用设置';
+  label.textContent=(state.traceConfigDirty?'待应用；当前：':'回读：')+traceSettingsText(info?.config);
   label.classList.toggle('pending',state.traceConfigDirty);
-  label.title=info?.config?`硬件回读：Trace ID ${info.config.traceid??'未知'} · 返回栈压缩 ${!!(info.config.config&0x1000)} · 周期计数 ${!!(info.config.config&0x10)}`:'';
+  label.title=info?.config?`硬件回读：Trace ID ${info.config.traceid??'未知'} · ${traceSettingsText(info.config)}`:'';
 }
-for(const id of ['traceid','return-stack','cycles'])$(id).addEventListener(id==='traceid'?'input':'change',()=>{state.traceConfigDirty=true;updateTraceConfigState();});
+for(const id of ['traceid','branch-broadcast','return-stack','cycles'])$(id).addEventListener(id==='traceid'?'input':'change',()=>{state.traceConfigDirty=true;updateTraceConfigState();});
 const startupNames=new Set(['Reset_Handler','SystemInit','SystemClock_Config','main']);
 function entry(trace=false){
   if(!state.elfInfo)throw Error('先载入匹配的 ELF');
@@ -90,9 +91,16 @@ async function withBreakpointsSuspended(fn){const items=target.breakpoints.items
 async function showTarget(info){$('target-state').textContent=info.name+' · '+(info.halted?'已暂停':'运行中')+' · DEV_ID '+hex(info.device&4095);$('config-values').textContent=JSON.stringify(info,null,2);
   $('target-capability').textContent=info.etmVersion+(info.traceSupported?' · 已适配':' · Trace 待适配');$('target-capability').title=info.traceStatus;$('expected-cpu').max=String(targetPort(info.profile).maxCoreHz/1e6);
   const f103=info.profile==='stm32f103ze';
-  if(info.traceSupported&&!state.traceConfigDirty){$('traceid').value=info.config.traceid>=1&&info.config.traceid<=111?info.config.traceid:2;$('return-stack').checked=!f103&&!!(info.config.config&0x1000);$('cycles').checked=!f103&&!!(info.config.config&0x10);}
+  if(info.traceSupported&&!state.traceConfigDirty){
+    $('traceid').value=info.config.traceid>=1&&info.config.traceid<=111?info.config.traceid:2;
+    const current=traceSettings(info.config);if(current){$('branch-broadcast').checked=current.branchBroadcast;$('return-stack').checked=current.returnStack;$('cycles').checked=current.cycleCount;}
+  }
+  for(const [id,option]of [['branch-broadcast','branchBroadcast'],['return-stack','returnStack'],['cycles','cycleCount']]){
+    if(info.traceOptions?.[option]===false)$(id).checked=false;
+  }
+  $('branch-broadcast').title=info.traceOptions?.branchBroadcast===false?'当前目标未实现分支广播':'增加分支地址输出，可能引起 overflow；F103 CDC 建议关闭，关闭后仍依赖匹配 ELF 重建执行流';
   if(f103){$('return-stack').checked=false;$('cycles').checked=false;$('pin-speed').value='3';}
-  $('return-stack').title=f103?'ETM-M3 返回栈位保留，不支持此选项':'';$('cycles').title=f103?'ETM-M3 周期准确模式位保留，不支持此选项':'';
+  $('return-stack').title=f103?'ETM-M3 返回栈位保留，不支持此选项':info.traceOptions?.returnStack===false?'当前 ETM 回读未实现返回栈压缩':'减少函数返回地址输出，降低带宽';$('cycles').title=f103?'ETM-M3 周期准确模式位保留，不支持此选项':info.traceOptions?.cycleCount===false?'当前 ETM 回读未实现周期计数':'增加周期信息和输出量；当前图表仍按执行序号展示';
   $('pin-speed').querySelector('[value="3"]').textContent=f103?'50 MHz · AF 推挽':'超高速 · 基准值';
   $('pin-speed').closest('details').querySelector('.hint').textContent=f103?'4 位 DDR：ETM → TPIU，PE2～PE6。时钟由固件提供；Web 配置引脚和 Trace 寄存器，并行协议保持 0。':'已验收：4 位并行 DDR，ETM → Funnel → ETF → TPIU。输出时钟由固件提供。';
   if(info.traceSupported)updateTraceConfigState(info);

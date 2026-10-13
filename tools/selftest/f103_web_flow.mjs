@@ -2,7 +2,7 @@
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {EtmTarget} from '../../web/app/target.js';
-const apiRoot='http://127.0.0.1:8770/api/',bridge='http://127.0.0.1:8772';
+const apiRoot=process.env.ETM_API_ROOT||'http://127.0.0.1:8770/api/',bridge=process.env.ETM_BRIDGE_ROOT||'http://127.0.0.1:8772';
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function request(url,body){const r=await fetch(url,body===undefined?{}:body instanceof FormData?{method:'POST',body}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw Error(data.error||r.statusText);return data;}
 const api=(path,body)=>request(apiRoot+path,body),rpc=(path,body={})=>request(bridge+path,body);
@@ -27,7 +27,7 @@ try{
       assert.equal(await t.pc(),entry);report.checks.push(reset?'reset-to-entry':'run-to-entry');
       info=await t.configure();assert.equal(info.config.protocol,'ETMv3');
       assert.equal((info.config.ctrl&0xc01),0x800);assert.equal(info.width,8);
-      const created=await api('capture',{elfId:elf.elfId,rate:500000000,seconds:.002,threshold:2,sync:true,decode:true,
+      const created=await api('capture',{elfId:elf.elfId,rate:500000000,seconds:Number(process.env.ETM_SECONDS||.002),threshold:2,sync:true,decode:true,
         clock:0,data:[1,2,3,4],fraction:.25,config:info.config,targetVerified:true,targetSnapshot:info,
         captureScope:'business-unfiltered-window',captureEntry:entry});
       let resumed=false;
@@ -56,12 +56,12 @@ try{
   assert.equal(t.entryBreak,null);assert.ok(await t.isHalted());report.checks.push('entry-cancel-cleanup');
   // Stop an armed LA while the CPU remains halted, rather than collecting an invented path.
   info=await t.configure();
-  const stop=await api('capture',{elfId:elf.elfId,rate:500000000,seconds:.002,threshold:2,sync:true,decode:false,
+  const stop=await api('capture',{elfId:elf.elfId,rate:500000000,seconds:Number(process.env.ETM_SECONDS||.002),threshold:2,sync:true,decode:false,
     clock:0,data:[1,2,3,4],config:info.config,targetSnapshot:info,targetVerified:true,fraction:.25});
   for(let i=0;i<100;i++){const job=await api('jobs/'+stop.job);if(job.state==='armed'){await api('stop/'+stop.job,{});report.checks.push('armed-LA-stop');break;}if(job.state==='error')throw Error(job.error);await sleep(100);}
   for(let i=0;i<200;i++){const job=await api('jobs/'+stop.job);if(['done','error'].includes(job.state)){report.stoppedJob=job;break;}await sleep(100);}
   assert.equal(report.stoppedJob?.state,'done');
-  await mkdir('docs/validation',{recursive:true});await writeFile('docs/validation/f103-web-flow.json',JSON.stringify(report,null,2));
+  await mkdir('docs/validation',{recursive:true});await writeFile(process.env.ETM_REPORT||'docs/validation/f103-web-flow.json',JSON.stringify(report,null,2));
   console.log('F103 web flow passed',report.captures.map(c=>c.record));
 }finally{
   try{await t.clearEntryBreak();await t.breakpoints.clear();await t.restore();}finally{t.bus.close();await rpc('/shutdown').catch(()=>{});}
