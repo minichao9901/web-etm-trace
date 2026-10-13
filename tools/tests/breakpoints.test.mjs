@@ -50,7 +50,7 @@ test('restore only the suspended subset, leaving unverified pending breakpoints 
   }finally{t.bus.close();}
 });
 test('F1 inspection reads its own RCC/DBG and blocks H7-only trace writes',async()=>{
-  const t=new EtmTarget(),writes=[],mem=new Map([[0xe000ed00,0x410fc231],[0xe0042000,0x414],
+  const t=new EtmTarget(),writes=[],mem=new Map([[0xe000ed00,0x410fc231],[0xe0042000,0x410],
     [0x40021000,(1<<17)|(1<<25)],[0x40021004,(2<<2)|(1<<16)|(7<<18)],[0xe0002000,0x60]]);
   t.hseHz=8e6;t.read=async a=>{if(a>=0x5c000000&&a<0x5c020000)throw Error('不能访问 H7 寄存器');return mem.get(a)||0;};
   t.write=async(a,v)=>writes.push([a,v]);t.probe={isHalted:async()=>false};

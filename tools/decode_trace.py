@@ -195,6 +195,8 @@ def decode(id_stream, elf, workdir, config=None, sources=None):
     source_files = {e['file'] for e in events if e['kind'] == 'instruction' and e['file']}
     source_data = {f: image.source(f) for f in sorted(source_files)}
     instruction_count = sum(e['kind'] == 'instruction' for e in events)
+    if not instruction_count:
+        raise ValueError('没有恢复到可信指令范围；原始采集和 native 包记录已保留。请检查 CPU 是否继续、ETM 同步、Trace ID 与匹配 ELF。')
     faults = [p for p in packets if any(term in p['text'].upper() for term in ('OVERFLOW', 'BAD_SEQUENCE', 'BAD_TRACEMODE', 'RESERVED'))]
     result = dict(version=1, protocol=protocol, config=config,inputBytes=len(id_stream),
                 elf=dict(name=Path(elf).name, sha256=hashlib.sha256(image.bytes).hexdigest()),

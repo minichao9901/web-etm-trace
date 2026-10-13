@@ -17,7 +17,6 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if ($StandaloneEtm -and $Chip -ne 'ze') { throw '独立 ETM 模式仅支持 F103ZE' }
-if ($CpuMHz -ne 72 -and -not $StandaloneEtm) { throw '48 MHz 对照仅供独立 ETM 实验' }
 Import-Module (Join-Path $PSScriptRoot '..\tools\BuildTools.psm1') -Force
 
 $root = $PSScriptRoot

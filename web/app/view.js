@@ -25,6 +25,8 @@ function controls(){const busy=state.operation||!!state.job,connected=!!target.p
   $('target-profile').disabled=busy||connected;$('show-experiments').disabled=busy;
   $('save-record').disabled=!state.current;$('decode').disabled=!state.current||busy;$('export').disabled=!state.current;
   for(const id of ['rate','duration','threshold','fraction','channels','hse','expected-cpu','expected-trace','sync','reset-before','entry-before','pin-speed','traceid','return-stack','cycles','auto-clock'])$(id).disabled=busy;
+  for(const [id,option]of [['return-stack','returnStack'],['cycles','cycleCount']])$(id).disabled=busy||target.info?.traceOptions?.[option]===false;
+  if(target.info?.profile==='stm32f103ze')$('pin-speed').disabled=true;
   $('reset-before').disabled=busy||!$('entry-before').checked;
   $('expected-cpu').disabled=busy||$('auto-clock').checked;$('expected-trace').disabled=busy||$('auto-clock').checked;
   if(target.transportFault){for(const id of ['reset','halt','run','read-config','read-clock','apply-config','restore-config','run-to','start','remove-break'])$(id).disabled=true;for(const b of document.querySelectorAll('.symbol-row button,.breakpoint-row button,.breakpoint-row input'))b.disabled=true;}
@@ -48,7 +50,7 @@ function entry(trace=false){
   if(!bp)throw Error('请在断点列表中选择采集起点');
   const fn=state.elfInfo.functions?.find(f=>f.address===bp.address);
   if(trace&&fn&&startupNames.has(fn.name))throw Error('该启动入口尚未验收；可调试断点，请选择初始化后的业务位置采集');
-  if(trace&&bp.address>=0x08020000)throw Error('当前 trace 验收范围限 H7B0 内部 128 KiB Flash');
+    if(trace&&bp.address>=(target.info?.flashLimit||0x08020000))throw Error('断点超出当前目标的 Trace Flash 范围');
   return bp.address;
 }
 function renderSymbols(){
@@ -86,8 +88,13 @@ $('next-clock').onclick=()=>panel('clock');$('next-trace').onclick=()=>panel('tr
 async function resumeBreakpoints(items){if(!target.probe)return;const running=!(await target.isHalted());await target.halt();try{await target.breakpoints.resume(items);if(!running)target.breakpoints.hit(await target.pc());}finally{if(running)await target.run();renderBreakpoints();}}
 async function withBreakpointsSuspended(fn){const items=target.breakpoints.items.filter(b=>b.lease);await target.halt();state.waiting=true;return withCleanup(async()=>{await target.breakpoints.suspend();renderBreakpoints();return await fn();},async()=>{state.waiting=false;await resumeBreakpoints(items);},e=>log('断点恢复失败（保留首次错误）：'+e.message));}
 async function showTarget(info){$('target-state').textContent=info.name+' · '+(info.halted?'已暂停':'运行中')+' · DEV_ID '+hex(info.device&4095);$('config-values').textContent=JSON.stringify(info,null,2);
-  $('target-capability').textContent=info.traceSupported?'ETMv4 · H7B0 采集已验收':info.etmVersion+' · Trace 待适配';$('target-capability').title=info.traceStatus;$('expected-cpu').max=String(targetPort(info.profile).maxCoreHz/1e6);
-  if(info.traceSupported&&!state.traceConfigDirty){$('traceid').value=info.config.traceid??2;$('return-stack').checked=!!(info.config.config&0x1000);$('cycles').checked=!!(info.config.config&0x10);}
+  $('target-capability').textContent=info.etmVersion+(info.traceSupported?' · 已适配':' · Trace 待适配');$('target-capability').title=info.traceStatus;$('expected-cpu').max=String(targetPort(info.profile).maxCoreHz/1e6);
+  const f103=info.profile==='stm32f103ze';
+  if(info.traceSupported&&!state.traceConfigDirty){$('traceid').value=info.config.traceid>=1&&info.config.traceid<=111?info.config.traceid:2;$('return-stack').checked=!f103&&!!(info.config.config&0x1000);$('cycles').checked=!f103&&!!(info.config.config&0x10);}
+  if(f103){$('return-stack').checked=false;$('cycles').checked=false;$('pin-speed').value='3';}
+  $('return-stack').title=f103?'ETM-M3 返回栈位保留，不支持此选项':'';$('cycles').title=f103?'ETM-M3 周期准确模式位保留，不支持此选项':'';
+  $('pin-speed').querySelector('[value="3"]').textContent=f103?'50 MHz · AF 推挽':'超高速 · 基准值';
+  $('pin-speed').closest('details').querySelector('.hint').textContent=f103?'4 位 DDR：ETM → TPIU，PE2～PE6。时钟由固件提供；Web 配置引脚和 Trace 寄存器，并行协议保持 0。':'已验收：4 位并行 DDR，ETM → Funnel → ETF → TPIU。输出时钟由固件提供。';
   if(info.traceSupported)updateTraceConfigState(info);
   $('live-pc').textContent=info.halted?'当前 PC：'+hex(await target.pc()):'当前目标运行中；暂停后读取 PC';if(info.halted)target.breakpoints.hit(await target.pc());showClocks(info);renderBreakpoints();
 }
@@ -97,7 +104,7 @@ function showClocks(info=target.info){const c=info?.clocks,mhz=n=>n===null||n===
   if(c?.coreHz&&c?.physicalTraceHz){const match=Math.abs(c.coreHz-Number($('expected-cpu').value)*1e6)<100&&Math.abs(c.physicalTraceHz-Number($('expected-trace').value)*1e6)<100;$('clock-match').textContent=match?'实际时钟与填写的预期值一致':'实际时钟与预期不一致，请核对固件与板级晶振';$('clock-match').classList.toggle('bad',!match);}else $('clock-match').textContent='';clockPlan();}
 function clockPlan(){const cpu=Number($('expected-cpu').value),trace=Number($('expected-trace').value),rate=Number($('rate').value),hse=Number($('hse').value);
   if(!(cpu>0&&trace>0&&hse>0)){$('clock-plan').textContent=$('auto-clock').checked?'连接目标并填写板上 HSE 后，根据 RCC 自动计算频率。':'请填写有效的板级和预期频率';return;}
-  if(target.info?.profile&&!target.info.profile.startsWith('stm32h7')){$('clock-plan').textContent=target.info.clocks?.path+'\nTRACECLK = TRACEPORTCK / 2（4 位 DDR）\n固件配置供电、PLL、Flash 延迟及 trace 引脚；本型号 trace 输出/解码仍待适配。';return;}
+  if(target.info?.profile&&!target.info.profile.startsWith('stm32h7')){$('clock-plan').textContent=target.info.clocks?.path+'\nTrace 输入 = HCLK；TRACECLK = HCLK / 2（4 位 DDR）\n每半周期约 '+(rate/(2*trace*1e6)).toFixed(2)+' 个采样点\n固件负责 HSE/PLL/Flash/业务外设；Web 配置 Trace 引脚、ETM/TPIU 与采样。'+(target.info.traceSupported?'':'\n本型号 Trace 输出仍待适配。');return;}
   const p=560/cpu,r=280/trace,samples=rate/(2*trace*1e6);
   $('clock-plan').textContent='以本例 VCO 560 MHz、CDCPRE=1 为计算示例：\nP = '+p.toFixed(3)+'，R = '+r.toFixed(3)+'\nCPU / TRACECLK = '+(cpu/trace).toFixed(2)+'\n每半周期约 '+samples.toFixed(2)+' 个采样点\n'+(hse===25&&Number.isInteger(p)&&Number.isInteger(r)?'25 MHz HSE 的本例 M=5、N=112；仍需由固件验证合法分频、供电和总线约束。':'分频示例不是可直接应用的配置；HSE 改变时必须由固件重新规划 PLL。')+'\n零解码错误和频率比例都不能单独证明无损。';
 }
@@ -142,7 +149,8 @@ on('apply-config',async()=>{entry(true);const info=await target.configure(option
 on('check-la',async()=>{const s=await api('status');$('la-state').textContent='Kingst 已连接';$('la-state').className='status good';const old=$('rate').value;$('rate').replaceChildren(...s.rates.filter(n=>n>=50000000).map(n=>new Option(n/1e6+' MSa/s',n)));$('rate').value=s.rates.includes(Number(old))?old:String(s.rates[0]);clockPlan();});
 on('open-record',()=>loadRecord($('records').value));
 on('start',async()=>{const sync=$('sync').checked,channels=$('channels').value.split(',').map(s=>Number(s.trim()));if(channels.length!==5||new Set(channels).size!==5||channels.some(c=>!Number.isInteger(c)||c<0||c>15))throw Error('需要五个不同的 CH0～15 通道');
-  if(state.elfInfo.segments.some(s=>s.address+atob(s.data).length>0x08020000))throw Error('当前 trace 采集仍限 H7B0 内部 128 KiB Flash；此 ELF 可调试，但不能沿用该采集配置');
+  const flashLimit=target.info?.flashLimit||0x08020000;
+  if(state.elfInfo.segments.some(s=>s.address+atob(s.data).length>flashLimit))throw Error('ELF 超出当前目标的 Trace Flash 范围');
   const captureElf=state.elfInfo,captureElfId=state.elfId,captureSourceSnapshot=state.sourceSnapshot,requestedOptions=options(),selectedEntry=sync&&$('entry-before').checked?entry(true):null;
   let config={traceid:Number($('traceid').value),config:1},captureEntry=null,suspendedBps=[];
   let stage='校验 ELF';

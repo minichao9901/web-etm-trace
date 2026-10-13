@@ -4,6 +4,7 @@ import {identifyTarget,completeClocks} from './clock.js';
 import {Breakpoints} from './breakpoints.js';
 import {withCleanup} from './operation.js';
 import {decodeFpCtrl,encodeComparator,canBreak,compAddr} from './shared/dbg/bp.js';
+import {inspectF103,stopF103,configureF103,restoreF103} from './target-f103.js';
 
 const ETM=0xe0041000,FUNNEL=0x5c013000,ETF=0x5c014000,TPIU=0x5c015000;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -59,6 +60,7 @@ export class EtmTarget {
   async stopTrace(){
     await this.halt();await this.inspect();
     if(!this.info.traceSupported)return;
+    if(this.info.profile==='stm32f103ze')return stopF103(this);
     for(const base of [ETM,FUNNEL,ETF,TPIU])await this.unlock(base);
     if(this.osLocked===null)this.osLocked=!!((await this.read(ETM+0x314))&2);
     await this.write(ETM+0x310,0,false);
@@ -71,6 +73,7 @@ export class EtmTarget {
   }
   async restore(){
     if(!this.saved.size)return;
+    if(this.traceFamily==='f103')return restoreF103(this);
     this.assertTransport();
     const running=!(await this.isHalted());await this.halt();
     await this.write(0x5c001004,(await this.read(0x5c001004))|0x700000);
@@ -96,7 +99,10 @@ export class EtmTarget {
     if(!port)throw Error(`未预置此芯片：CPUID ${hex(cpuid)} / DEV_ID ${hex(device&4095)}`);
     const traceSupported=port.traceValidated;
     const config={};let width=null;
-    if(traceSupported){
+    if(traceSupported&&port.id==='stm32f103ze'){
+      this.traceFamily='f103';const f=await inspectF103(this);Object.assign(config,f.config);width=f.width;
+    }else if(traceSupported){
+      this.traceFamily='h7';
       await this.set(0x5c001004,0x700000,0x700000);await this.set(0xe000edfc,0x1000000,0x1000000);
       for(const [name,offset]of Object.entries({idr0:0x1e0,idr1:0x1e4,idr2:0x1e8,idr8:0x180,idr9:0x184,idr10:0x188,idr11:0x18c,idr12:0x190,idr13:0x194,config:0x10,traceid:0x40}))config[name]=await this.read(ETM+offset);
       width=await this.read(TPIU+4);
@@ -113,7 +119,8 @@ export class EtmTarget {
     }catch(e){clockError=e.message;}
     this.breakpoints.capacity=decodeFpCtrl(await this.read(0xe0002000)).numCode;
     this.info={cpuid,device,profile:port.id,name:port.name,core:port.core,etmVersion:port.etmVersion,traceSupported,
-      traceStatus:traceSupported?'H7B0 70/35 MHz 已验收；同组其他型号仍需实测':'型号/时钟/断点可用；本型号 trace 配置与解码尚未验收',
+      traceStatus:traceSupported?port.id==='stm32f103ze'?'F103ZE 48/24 MHz Kingst 联动与 ETMv3 解码已验收；封装须有 PE2～PE6':'H7B0 70/35 MHz 已验收；同组其他型号仍需实测':'型号/时钟/断点可用；本型号 trace 配置与解码尚未验收',
+      flashLimit:port.id==='stm32h7b0'?0x08020000:port.flashLimit,traceOptions:{returnStack:port.id==='stm32h7b0',cycleCount:port.id==='stm32h7b0'},
       config,halted:await this.isHalted(),rcc,clocks,clockError,hseHz:this.hseHz,width};return this.info;
   }
 
@@ -156,7 +163,7 @@ export class EtmTarget {
   }
   async runTo(address,{timeout=15000}={}){
     this.cancelEntry=false;
-    address=(Number(address)>>>0)&~1;if(address<0x08000000||address>=(this.info?.profile==='stm32f1'||this.info?.profile==='stm32f4'?0x08100000:0x08200000))throw Error('断点须在目标内部 Flash');
+    address=(Number(address)>>>0)&~1;if(address<0x08000000||address>=(this.info?.flashLimit||0x08200000))throw Error('断点须在目标内部 Flash');
     await this.clearEntryBreak();await this.stopTrace();
     if(await this.pc()===address)return this.inspect();
     const caps=decodeFpCtrl(await this.read(0xe0002000));if(!canBreak(address,caps.rev))throw Error('FPB 不支持该地址');
@@ -176,7 +183,7 @@ export class EtmTarget {
     this.assertTransport();this.cancelEntry=false;
     if(address===null)throw Error('请先选择初始化后的业务起点；复位入口捕获尚未验收');
     address=(Number(address)>>>0)&~1;
-    if(address<0x08000000||address>=0x08200000)throw Error('起点必须在 STM32 内部 Flash');
+    if(address<0x08000000||address>=(this.info?.flashLimit||0x08200000))throw Error('起点必须在 STM32 内部 Flash');
     await this.clearEntryBreak();await this.stopTrace();
     const demcr=await this.read(0xe000edfc),caps=decodeFpCtrl(await this.read(0xe0002000));
     let free=null,retained=false;
@@ -207,6 +214,7 @@ export class EtmTarget {
     await this.inspect();if(!this.info.traceSupported)throw Error(this.info.traceStatus);
     if(!Number.isInteger(traceid)||traceid<1||traceid>0x6f)throw Error('Trace ID 范围为 1~111');
     if(!Number.isInteger(pinSpeed)||pinSpeed<1||pinSpeed>3)throw Error('trace 引脚速度范围为 1~3');
+    if(this.info.profile==='stm32f103ze')return configureF103(this,{traceid,returnStack,cycleCount,pinSpeed});
     await this.halt();await this.inspect();
     if(this.info.clockError)throw Error(this.info.clockError);if(!this.info.clocks.traceReady)throw Error('PLL1 R 输出没有启用，请由目标固件配置');
     await this.set(0x580244e0,1<<4,1<<4);

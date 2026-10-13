@@ -476,7 +476,7 @@ def capture_job(jid, sid, options):
         v.cmd(f"set-sample-rate {options['rate']}")
         v.cmd(f"set-sample-time {options['seconds']}")
         v.cmd(f"set-threshold-voltage {options['threshold']}")
-        # Sync mode waits for the next trace clock edge. GUI stop remains available.
+        # D0 stays high during formatter idle; a clock edge alone would trigger before CPU resumes.
         v.cmd(f"set-trigger --reset --neg-edge {options['data'][0]}" if options['sync'] else 'set-trigger --reset')
         change(jid, state='starting')
         v.sock.settimeout(60)
@@ -558,7 +558,7 @@ def start_capture():
              threshold=float(o.get('threshold', 1.65)), sync=bool(o.get('sync')),
              decode=bool(o.get('decode')), clock=int(o.get('clock', 0)),
              data=[int(n) for n in o.get('data', [1, 2, 3, 4])],
-             config={**DEFAULT_CONFIG, **o.get('config', {})}, elfId=o.get('elfId'),sourceSnapshot=o.get('sourceSnapshot'),
+             config=decoder_config(o.get('config', {})), elfId=o.get('elfId'),sourceSnapshot=o.get('sourceSnapshot'),
              libraryOrigin='validation' if o.get('libraryOrigin')=='validation' else 'user',
              targetVerified=bool(o.get('targetVerified')), fraction=float(o.get('fraction', .25)),
              targetSnapshot=o.get('targetSnapshot'),captureScope=o.get('captureScope','unfiltered-window'),captureEntry=o.get('captureEntry'))
@@ -579,8 +579,9 @@ def start_capture():
         (folder / 'sources.json').write_text(json.dumps(source_files), encoding='utf-8')
     elif o['elfId'] and (directory(o['elfId'])/'sources.json').exists():
         (folder/'sources.json').write_bytes((directory(o['elfId'])/'sources.json').read_bytes())
-    save(sid, dict(name='H7B0 · ' + time.strftime('%Y-%m-%d %H:%M:%S'), created=time.time(),
-                   input='capture.csv', **o, configBasis='SWD snapshot' if o['targetVerified'] else 'H7B0 firmware preset'))
+    name=(o.get('targetSnapshot') or {}).get('name') or o['config'].get('protocol','ETMv4')
+    save(sid, dict(name=name+' · '+time.strftime('%Y-%m-%d %H:%M:%S'), created=time.time(),
+                   input='capture.csv', **o, configBasis='SWD snapshot' if o['targetVerified'] else 'provided trace configuration'))
     jid = new_job(sid, 'queued')
     threading.Thread(target=capture_job, args=(jid, sid, o), daemon=True).start()
     return jsonify(job=jid, record=sid)
@@ -672,6 +673,8 @@ def download(sid, kind):
 
 def samples():
     for name, stem in [('500m', 'trace-20261011-000319'), ('100m', 'trace-20261011-000616')]:
+        if not all((ROOT / f'captures/{stem}.{ext}').is_file() for ext in ('csv','kvdat')):
+            continue  # Ignored captures are not automatically copied into worktrees.
         sid = 'sample-' + name
         folder = directory(sid)
         folder.mkdir(exist_ok=True)
