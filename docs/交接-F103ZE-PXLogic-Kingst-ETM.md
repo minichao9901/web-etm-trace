@@ -4,6 +4,15 @@
 工程：`E:\web-etm-trace`  
 目标：STM32F103ZE（Cortex-M3，ETMv3），4 位并行 DDR Trace；用逻辑分析仪采集，后续解出 TPIU / ETM 指令执行流。
 
+## 2026-10-13 当前推荐：CDC 48/24 MHz，分支广播可选且默认关闭
+
+当前板上是普通 `firmware/stm32f103_cdc_trace/fw-ze.elf`，CPU/HCLK 48 MHz、TRACECLK 24 MHz。
+新页面入口：http://127.0.0.1:8774/ 。请重新载入新的 ELF，不使用原72 MHz镜像核对目标。
+采集页新增分支广播勾选和带宽说明，返回栈压缩/周期计数按芯片能力启用；实际配置回读并保存。
+单纯降频时同一CDC窗口仍有16次overflow，关闭分支广播后最终控制器三轮10 ms均为0。
+已知负载的复位/无复位/再复位也通过，首轮652个完整round的调用和循环次数正确。
+详见 [CDC时钟与ETM选项验收](F103ZE-CDC-48MHz与ETM选项验收.md)。
+
 ## 2026-10-13 集成状态：F103ZE 已走通 Web → Kingst 联动
 
 当前操作说明以 [F103ZE-Web联动验收.md](F103ZE-Web联动验收.md) 为准；下面的独立固件解码章节保留为前序证据。
