@@ -61,9 +61,12 @@ export async function restoreF103(t){
   if(!t.saved.size)return;
   t.assertTransport();const running=!(await t.isHalted());await t.halt();
   const cr=t.saved.get(F103_ETM);
-  await t.unlock(F103_ETM);await t.unlock(ITM);
-  await t.write(F103_ETM,(await t.read(F103_ETM)&~0x801)|0x400,false);
-  await t.wait(F103_ETM+0x10,2,2);
+  if(cr){
+    await t.unlock(F103_ETM);
+    await t.write(F103_ETM,(await t.read(F103_ETM)&~0x801)|0x400,false);
+    await t.wait(F103_ETM+0x10,2,2);
+  }
+  if(t.saved.has(ITM+0xe80))await t.unlock(ITM);
   const last=[F103_ETM,0x40011800,0x40021018,DBG,DEMCR];
   const restoreOne=async addr=>{const s=t.saved.get(addr);if(s)await t.write(addr,((await t.read(addr)&~s.mask)|(s.before&s.mask))>>>0);};
   for(const addr of [...t.saved.keys()].reverse())if(!last.includes(addr))await restoreOne(addr);

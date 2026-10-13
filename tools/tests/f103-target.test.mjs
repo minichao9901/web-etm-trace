@@ -36,3 +36,8 @@ test('F103 reserved return stack/cycle options fail before configuring trace',as
     assert.ok(writes.every(([a])=>a!==0xe0041000));
   }finally{t.bus.close();}
 });
+test('inspection failure restores only the acquired DEMCR lease without programming an unknown ETM',async()=>{
+  const {t,mem,writes}=target();try{mem.set(0xe00411e4,0);await assert.rejects(t.inspect(),/未识别到/);
+    await t.restore();assert.ok(writes.every(([a])=>a===0xe000edfc));assert.equal(t.saved.size,0);
+  }finally{t.bus.close();}
+});
