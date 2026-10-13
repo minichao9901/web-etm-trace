@@ -59,7 +59,7 @@ python -X utf8 tools\la\pxlogic_la.py capture `
   --channels 0,1,2,3,4 --rate 500M --time 2ms --threshold 1.5 `
   --out captures\f103ze-pxlogic.csv --stats
 # 有已知频率参考时顺带核对实际采样率（本机 CH0 = LA 自身 PWM0 = 1 kHz）
-python -X utf8 tools\la\pxlogic_la.py capture --channels 0 --rate 10M --time 1ms `
+python -X utf8 tools\la\pxlogic_la.py capture --channels 0 --rate 10M --time 5ms `
   --out captures\ref.csv --verify-hz 1000 --stats
 
 # 已知信号自检（CH0 接 LA 自身 PWM0：1 kHz、50%），失败返回非 0，可当验收脚本
