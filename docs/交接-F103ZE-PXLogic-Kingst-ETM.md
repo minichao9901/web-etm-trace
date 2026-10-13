@@ -13,10 +13,107 @@
 已知负载的复位/无复位/再复位也通过，首轮652个完整round的调用和循环次数正确。
 详见 [CDC时钟与ETM选项验收](F103ZE-CDC-48MHz与ETM选项验收.md)。
 
+## 接手必读：没有波形的根因、Web 稳定流程与分支广播带宽
+
+本节为2026-10-13对前序排查的核对结论。下面旧记录包含当时的推测，应以本节和当前验收报告为准。
+
+### 1. 最初没有 Trace 是多个问题叠加
+
+**明确的初始化故障：**旧独立固件把状态等待和编程顺序用错，超时后直接返回，跳过后续输出配置。
+现场读到 `ETMCR=0xC10`（编程位bit10仍置位，不能据ETMEN置位认定正在输出）、`DBGMCU_CR=0x7`
+（TRACE_IOEN关闭）、`ITM_TCR=0`。这些是初始化没有完整完成的证据；不能说固件初始化“一直是对的”。
+另一个 `etm_status` 结算早于引脚状态回填的问题导致误报，需要与实际输出故障区分。
+
+**接线与GPIO问题：**最初五路曾接为PE1～PE5，已纠正为CH0～4对应PE2～PE6，并共地。
+GPIOE的PE2～PE6必须配置为50 MHz复用推挽，DBGMCU也必须打开Trace引脚门控；只配置ETM本体不足以建立输出。
+
+**诊断改变了目标状态：**此前重新建立调试会话时所用的初始化、复位/暂停和CoreSight写入，以及TPIU协议切换，
+可能改变已经由固件建立的Trace状态，造成“配置后有波形、诊断后又消失”的反复现象。
+这不是“所有pyOCD attach都会复位”的通用结论，更不能认为SWD只读回读本身必然破坏Trace。
+当前验收显式使用持续的attach会话，实际运行同一套Web目标控制器，已经证明SWD在线控制与Trace采集可以配合使用。
+
+### 2. 当前Web为什么稳定
+
+固件负责真实HSE/PLL、CPU/HCLK、Flash等待周期、USB及业务外设；普通Web模式不自行开启ETM。
+网页识别F103ZE的ETMv3能力，使用其实际的 **ETM → TPIU** 通路，不套用H7的Funnel/ETF寄存器。
+
+```text
+持续的同一探针会话
+  → 校验目标Flash与ELF
+  → 复位/运行并停在明确的业务断点
+  → 配置Trace GPIO、门控、ETM/TPIU并回读
+  → 武装Kingst
+  → 继续CPU并采集
+  → 保存原始数据和配置快照、解码
+  → 恢复本页断点与取得的寄存器资源
+```
+
+ETM的关键控制是：退出power-down，关闭输出门控，置编程位并等有效编程状态，写配置，退出编程并使能输出。
+失败会明确报错，不能用“忽略所有超时、继续初始化”代替确认配置成功。
+TPIU在此联动流程中一直保持并行协议0；恢复时也保留该协议，避免已实测的运行中切换停钟问题。
+“恢复”不表示自动切回SWO；切换协议前应复位并由对应页面重新配置。
+
+成功标准同时包括实际波形、合法TPIU/ETMv3包、匹配ELF及已知调用/循环核对，不能仅凭TRACECLK存在或四条数据线有跳变认定成功。
+
+### 3. 24 MHz TRACECLK仍可能overflow的原因
+
+四条数据线、双沿DDR、引脚TRACECLK 24 MHz时，原始线速上限为：
+
+```text
+4 bit × 2 edge/cycle × 24 MHz = 192 Mbit/s = 24 MB/s
+```
+
+格式化、同步及源ID占用一部分带宽，ETM有效载荷上限更低。LA的500 MSa/s只用于过采样波形，不能增加目标输出容量。
+ETM-M3的FIFO只有 **24字节**，短时间产出快于出口就可能溢出；整段窗口的平均数据量低于上限也不能排除突发溢出。
+[Arm Cortex-M3 DDI0337H，表10-1及ETMCR说明](https://documentation-service.arm.com/static/5e8e107f88295d1e18d34714)
+
+分支广播打开后，直接分支也输出目的地址，增加数据量。
+同一CDC初始化起点、500 MSa/s、10 ms实测：原72/36 MHz为63次overflow；48/24 MHz广播开为每轮16次；广播关最终三轮均为0。
+进一步核对48 MHz广播开记录：16个overflow之后恢复的首条指令都位于初始化的`memset`中，集中在开头区间。
+这支持“紧凑循环的突发地址输出填满FIFO”的判断；内部FIFO占用率没有直接测量，不能据此量化每一时刻的峰值速率或宣称任意负载都不会溢出。
+证据：`records/capture-2c0589af7f9049eeaa33159eacd78b5c/decoded.json`，以及
+[CDC对照与最终验收](F103ZE-CDC-48MHz与ETM选项验收.md)。
+
+### 4. 关闭分支广播的代价
+
+关闭广播仍跟踪分支执行结果。对于直接分支，解码器从匹配机器码推导目的地址；减少的是可由代码镜像推导的显式地址输出，
+不是对PC做间隔采样，也不是裁剪函数或时间范围。间接分支目的地址仍需由协议传递。
+固定代码且镜像完全匹配时，完整指令顺序仍可重建；本工程已用652个完整round、5216次mix调用及分支落点核对验证。
+[Arm ETMCR bit8定义](https://documentation-service.arm.com/static/5e8e107f88295d1e18d34714)
+
+代价是更依赖正确的代码镜像：自修改代码、动态生成的RAM代码、运行时补丁等场景需要取得对应代码内容，不能只依靠旧ELF。
+广播开启提供更多显式地址证据，有助于地址流分析；但即使开启广播，逐条指令和源码重建仍需要对应机器码/符号，不能凭它获得变量值。
+当前CDC是固定Flash代码，Web还校验Flash与ELF，因此 **48/24 MHz + 广播关闭** 是合适默认；需要对照时可在采集页主动勾选。
+
+### 5. CPU 24 MHz / TRACECLK 24 MHz能否实现
+
+这里的Trace频率始终指 **PE2引脚TRACECLK**，不是内部TRACECLKIN。F103ZE的CPU时钟为HCLK；TPIU输入接HCLK，
+同步Trace引脚时钟固定为HCLK/2。因此CPU降到24 MHz，TRACECLK也降到12 MHz，不能通过普通RCC分频独立配置成24/24 MHz。
+[ST RM0008 §31.17.6、§31.17.8](https://www.st.com/resource/en/reference_manual/rm0008-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+
+| 情况 | 四位DDR原始线速上限 | 平均到每CPU周期的原始带宽 | F103ZE是否可配置 |
+|---|---:|---:|---|
+| CPU48 / TRACECLK24 MHz | 192 Mbit/s | 4 bit | 当前默认 |
+| CPU24 / TRACECLK24 MHz | 192 Mbit/s | 8 bit | 假设，不能独立配置 |
+| CPU24 / TRACECLK12 MHz | 96 Mbit/s | 4 bit | 实际随HCLK降频的结果 |
+
+假设可以维持Trace24而将CPU减半，相对带宽会提高一倍，但能否保留广播仍要按真实分支密度、其他Trace数据和突发量实测。
+F103单纯降低主频不会改变上述带宽比，不能把降频当作必然消除overflow的方法。
+
+### 6. 旧记录中的寄存器表述更正
+
+- `SPPR=0`为并行同步Trace；`1`为Manchester SWO、`2`为NRZ SWO、`3`才是保留值。1/2不是非法时钟源。
+  本板切到SWO时PE2并行时钟消失、切回后需要复位的观察应作为协议切换限制记录，不推广成所有器件或所有SWD操作的结论。
+- `ETMSR bit1`是有效编程状态，应与`ETMCR bit10`的编程请求配合检查；不能把它笼统当成H7的IDLE位。
+- `ETMSR bit0`为未报告的溢出标志，不是TRACING使能位；旧记录的`ETMSR=1 → 正在追踪`推断不成立。
+  [Arm IHI0014Q，ETMSR位定义](https://documentation-service.arm.com/static/5f90158b4966cd7c95fd5b5e)
+- 不依据ETMCR中对ETM-M3无引脚控制作用的端口位判断物理线数；TPIU `CSPSR=0x8`是bit3选择四条数据线，不是“8条线”或“8-bit输入”设置。
+- 不能把M3的保留位当作通用ETMv3地址过滤选项；当前Web不写保留的返回栈/周期准确位，也不借保留位来“打开所有地址”。
+
 ## 2026-10-13 集成状态：F103ZE 已走通 Web → Kingst 联动
 
 当前操作说明以 [F103ZE-Web联动验收.md](F103ZE-Web联动验收.md) 为准；下面的独立固件解码章节保留为前序证据。
-当前板上普通固件是 `fw-ze-48-workload.elf`，CPU/HCLK 48 MHz、引脚 TRACECLK 24 MHz；**不是**独立开启 ETM 的 `fw-ze-standalone-48-workload.elf`。
+本节前序验收当时的普通固件是 `fw-ze-48-workload.elf`，CPU/HCLK 48 MHz、引脚 TRACECLK 24 MHz；**不是**独立开启 ETM 的 `fw-ze-standalone-48-workload.elf`。
 普通固件在 Web 配置之前没有 Trace 输出，这是预期行为。
 
 统一顺序：匹配 ELF → 连接识别 → 添加断点并选起点 → 填实际 HSE 8 MHz、核对时钟 → 配置 Kingst → 联动采集。
@@ -34,7 +131,7 @@ Kingst 10 ms 原主循环记录恢复 189,669 条指令记录和 10 次 SysTick 
 129 个完整 round 的交替调用和 1～8 次循环全部核对通过，包错误/overflow 均为 0，捕获两端未同步/不完整边界保留。
 
 关键修正：旧对齐脚本仅使用一种时钟沿，漏掉一半 DDR 数据；“bit0 必须为 1”和“00×N+FF×N 同步头”的评分依据不成立。
-现用双沿 DDR 提取、TPIU `FF FF FF 7F` 帧同步及 OpenCSD ETMv3 解码。最新板上固件为 `fw-ze-standalone-48-workload.elf`（48/24 MHz）。
+现用双沿 DDR 提取、TPIU `FF FF FF 7F` 帧同步及 OpenCSD ETMv3 解码。该阶段板上固件为 `fw-ze-standalone-48-workload.elf`（48/24 MHz）。
 
 ## 解码方法与复现步骤（接手者从这里开始）
 
@@ -209,7 +306,7 @@ CSV 输入表示“尚未移除 TPIU 的物理采集”；BIN 输入表示“已
 
 网页已支持这些 ETMv3 记录的解码与浏览；F103 的在线 SWD 配置和联动采集控制仍待适配，暂用独立固件与 Kingst 脚本采集。
 
-## ★★ 2026-10-13 最终结论：四条数据线全部调出 —— 根因是"诊断方式破坏了被测状态"
+## 前序排查：修复初始化后，诊断过程仍会改变被测状态
 
 ### 结果（干净烧录 + 复位后立即采集，全程不碰 SWD）
 
@@ -226,16 +323,16 @@ CH4(PE6/TRACED3)  =  6.064 MHz   12123 跳变
 
 ### 根因（重要，避免再踩）
 
-**固件的 ETM/TPIU/GPIO/ITM 初始化一直是对的。** 之前反复看到"只有时钟、数据线恒高"，
-是**排查手法本身造成的**：
+**在修复初始化缺陷之后**，此前反复看到“只有时钟、数据线恒高”还有诊断过程改变目标状态的因素；不能把全部故障归为诊断方式：
 
-1. 每次采集前后都用 pyOCD attach 读寄存器验证 → **pyOCD attach 会复位目标并写 CoreSight 寄存器**，
-   把刚建好的 trace 状态毁掉，再去采自然只剩时钟。
-2. 更隐蔽的一条：**给 TPIU 的 `SPPR`(0xE00400F0) 写非 0 值（1/2/3）会让 TPIU 进入非法时钟源模式，
+1. 当时采集前后使用的pyOCD目标初始化/连接流程改变了CoreSight状态，可能包含复位或初始化写入，
+   因而此前配置的trace状态丢失，再采时只剩时钟。这是当时那套连接/初始化路径的实测现象，
+   不代表任何pyOCD attach，或只读SWD检查，都会复位目标。
+2. 更隐蔽的一条：**给TPIU的`SPPR`(0xE00400F0)写1/2会切到SWO协议，3为保留值；当时切换后观察到并行输出消失，
    连 TRACECLK 都停**，而且**写回 0 也恢复不了，必须复位目标**。
-   实测（`tmp/f103ze_try_all.py` 扫描）：基线组四条线全跳；一旦把 SPPR 改成 1/2/3，
-   之后所有采集连时钟都没有，且回写 SPPR=0 无效。
-   → **SPPR 只能写 0**；要试别的值必须复位恢复。
+   实测（`tmp/f103ze_try_all.py` 扫描）：基线组四条线全跳；在本板把SPPR切到SWO后，并行Trace输出消失，
+   回写0也没有恢复，完整复位与重新配置后才恢复并行输出。RM0008定义的SPPR=1/2是合法SWO协议，并非非法时钟源。
+   → 该联动流程把SPPR保持0；本板切换输出协议后须完整复位和重新配置再验。
 
 ### 正确的工作方式（已验证）
 
@@ -243,7 +340,8 @@ CH4(PE6/TRACED3)  =  6.064 MHz   12123 跳变
 # 1) 烧录（OpenOCD 结束时会 reset run，固件自行初始化并保持运行）
 bash tools/ocd_flash.sh stm32f1x.cfg stm32f103_cdc_trace/build/ze-standalone-48/fw.elf
 # 2) 等约 2 秒让固件配完
-# 3) 直接采集，中间不要做任何 pyOCD attach / halt
+# 3) 此独立固件历史采集配置中直接采集；不要重复会改变该目标状态的默认初始化/复位。
+#    持续SWD会话及只读回读是否安全取决于会话选项；当前Web模式已验收联动控制。
 python tools/la/kingst_la.py capture --rate 500000000 --time 0.001 --threshold 2.0 \
   --channels 0 1 2 3 4 --out E:\web-etm-trace\captures\xxx.csv --stats --no-kvdat
 ```
@@ -255,10 +353,10 @@ kingst_la.py 采集），不要分两个进程、也不要中间 halt。
 
 虽然"数据线不动"是诊断造成的假象，但固件里确实存在三个缺陷，已修：
 
-1. `trace_etm_standalone_init()` **第一个 IDLE 等待超时后直接 `return`** →
+1. `trace_etm_standalone_init()` **第一个状态等待超时（旧记录误称IDLE）后直接 `return`** →
    DBGMCU（trace 引脚使能）、ITM 同步、TRACEOUT 收尾全被跳过。
    修复前实测 `DBGMCU_CR=0x7`（TRACE_IOEN=0）、`ITM_TCR=0`、`etm_status=2`。
-2. IDLE 等待顺序错误：ETMv3 必须**先停 TRACEOUT 再等 IDLE=1**；原代码在 TRACEOUT=1 时等，必然超时。
+2. 编程状态等待顺序错误：应置编程请求后等待ETMSR bit1生效；旧代码的错误等待触发提前返回。不要把H7的IDLE逻辑套到M3。
 3. `etm_status` 在引脚位（bit7）之前结算，永远报 3 而非 4。
 
 修复后：`g_trace.etm_status = 4`、`etm_bits = 0xff`（八步全过）。
@@ -331,7 +429,7 @@ kingst_la.py 采集），不要分两个进程、也不要中间 halt。
 | `f103ze_trace_state.py` | 复位→运行→halt 后一次性 dump 全部 trace 寄存器 |
 | `f103ze_coresight_scan.py` | 扫 ROM 表识别 CoreSight 组件 |
 
-> 注意：`f103ze_try_all.py` 里试过给 `SPPR` 写 1/2/3 —— 会让 TPIU 进非法状态、连 TRACECLK 都停，
+> 注意：`f103ze_try_all.py` 里试过给 `SPPR` 写 1/2/3 —— 当时切换后观察到并行TRACECLK停止，
 > 且必须复位才能恢复。**SPPR 只写 0**。
 
 ---
@@ -353,13 +451,12 @@ kingst_la.py 采集），不要分两个进程、也不要中间 halt。
 
 `firmware/stm32f103_cdc_trace/src/trace_hooks.c` 的 `trace_etm_standalone_init()`：
 
-1. **致命：第一个 IDLE 等待超时后直接 `return`**。
+1. **致命：第一个状态等待超时（旧记录误称IDLE）后直接 `return`**。
    后果是后面的 **DBGMCU（trace 引脚使能）、ITM 同步、TRACEOUT 收尾全都没执行**。
    实测现场证据（修复前）：`g_trace.etm_status=2`、`DBGMCU_CR=0x7`（**TRACE_IOEN(bit5)=0，引脚没使能**）、
    `ITM_TCR=0`、`ETMCR=0xc10`（PROG 还挂着）。GPIOE_CRL 明明已是 `0x4bbbbb44`（PE2~PE6 = AF 推挽 50MHz），
    但外设没被使能 → 引脚上什么都没有 → **这就是"只有时钟/什么都没有"的直接原因**。
-2. **IDLE 等待顺序用错**：ETMv3 要进编程模式必须**先停 tracing（TRACEOUT=0）再等 IDLE=1**；
-   原代码在 TRACEOUT 仍为 1 的状态下等 IDLE，必然超时（于是必然触发 bug 1）。
+2. **状态等待和编程顺序用错**：应置编程请求后检查ETMSR bit1；旧代码的等待位置和状态位解释错误触发超时返回。正确顺序以当前Web驱动为准。
 3. `etm_status` 在 `standalone_init()` 内就结算，而引脚位（bit7）是它返回**之后**才置的 → 永远报 3 而不是 4。
 
 修法：IDLE 等待降级为"仅记录、不再中断流程"；按 ETMv3 规定的顺序（PWD_DWN=0 → 清 TRACEOUT → PROG=1 →
@@ -372,8 +469,8 @@ g_trace.etm_status = 4        etm_bits = 0xff（八步全过）
 DBGMCU_CR = 0xE7   ← TRACE_IOEN=1, TRACE_MODE=11（4 位 trace），修复前是 0x7
 ITM_TCR   = 0x1000D
 ETMCR     = 0x810  ← PWD_DWN=0, PROG=0, ETM_EN(b11)=1
-ETMSR     = 0x1    ← **TRACING=1，ETM 确实在追踪**
-TPIU: SSPSR=0xB / CSPSR=8（4 线 DDR）/ SPPR=0（并行同步口）/ FFSR=8（格式化器在跑）/ DEVID=0xCA1
+ETMSR     = 0x1    ← bit0为未报告溢出标志；旧“TRACING=1”解释已更正，不能据此证明正在输出
+TPIU: SSPSR=0xB / CSPSR=8（bit3选择4条数据线）/ SPPR=0（并行同步口）/ FFSR=8（格式化器在跑）/ DEVID=0xCA1
 GPIOE_CRL = 0x4bbbbb44  ← PE2~PE6 = AF 推挽 50MHz
 ```
 
@@ -388,7 +485,7 @@ CH4(PE6) = 无跳变（上一次采集里它曾以 6 MHz 动过）
 ```
 
 时钟频率**精确等于 24 MHz**，与 48/24 MHz 档的理论值完全吻合 —— 说明
-**固件 + ETM + TPIU 已经正确工作并在输出**。
+**并行时钟路径已在输出**；ETM有效包与执行流仍须另行解码验证。
 
 ### 顺带查清的两件事
 
@@ -477,7 +574,7 @@ pwsh -NoProfile -File .\build.ps1 -Chip ze -StandaloneEtm -CpuMHz 48
 - `firmware/stm32f103_cdc_trace/build/ze-standalone/fw.elf`：72 MHz CPU / 36 MHz TRACECLK。
 - `firmware/stm32f103_cdc_trace/build/ze-standalone-48/fw.elf`：48 MHz CPU / 24 MHz TRACECLK（信号裕量对照档）。
 
-最后烧录的是 **48/24 MHz 独立 ETM 版本**。由 `g_trace.etm_status` 在线回读为 `4`，PE 引脚寄存器也符合复用推挽设置。采集时不要连接 SWD：本机 pyOCD attach 会把 `ITM_TCR` 清零，可能改变独立固件的同步输出状态。若用 SWD 检查过目标，重新复位目标后再做 LA 采集。
+最后烧录的是 **48/24 MHz 独立 ETM 版本**。由 `g_trace.etm_status` 在线回读为 `4`，PE 引脚寄存器也符合复用推挽设置。该阶段独立模式采集应避免插入会改变目标的调试初始化：当时使用的pyOCD初始化曾把`ITM_TCR`清零；不代表所有attach或只读SWD都会如此。若用 SWD 检查过目标，重新复位目标后再做 LA 采集。
 
 构建脚本还修正了 USB 向量自检：原检查错用了向量表下标，并未去除 Thumb 地址最低位。现在检查 IRQ19/20 的真实向量，并与 USB HP/LP 函数地址比较。CB 和 ZE 构建均已通过新自检。
 
