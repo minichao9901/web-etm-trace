@@ -12,6 +12,9 @@ export async function inspectF103(t){
 
 async function programming(t){
   await t.unlock(F103_ETM);
+  // TRACE_IOEN supplies HCLK to the F103 TPIU. After flash/reset this gate
+  // can be off; enable it before draining/awaiting the programming state.
+  await t.set(DBG,0xe0,0xe0);
   // Power-down must be cleared before the other ETM fields can be written.
   await t.set(F103_ETM,1,0);
   await t.set(F103_ETM,0x800,0);

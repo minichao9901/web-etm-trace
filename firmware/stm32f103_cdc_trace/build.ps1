@@ -13,7 +13,7 @@ param(
     [ValidateSet('cb', 'ze')][string]$Chip = 'cb',
     [string]$Gcc,
     [switch]$StandaloneEtm,
-    [ValidateSet(48, 72)][int]$CpuMHz = 72,
+    [ValidateSet(24, 48, 72)][int]$CpuMHz = 72,
     [switch]$TraceWorkload
 )
 $ErrorActionPreference = 'Stop'
@@ -27,7 +27,7 @@ if (-not $Gcc) { $Gcc = (Get-Command arm-none-eabi-gcc).Source }
 $bin  = Split-Path -Parent $Gcc
 $sdk  = Join-Path $root 'sdk\Drivers'
 $variant = if ($StandaloneEtm) { "$Chip-standalone" } else { $Chip }
-if (($CpuMHz -eq 48 -and ($explicitCpuMHz -or $StandaloneEtm -or $TraceWorkload)) -or
+if (($CpuMHz -in @(24, 48) -and ($explicitCpuMHz -or $StandaloneEtm -or $TraceWorkload)) -or
     ($Chip -eq 'ze' -and $CpuMHz -eq 72)) { $variant += "-$CpuMHz" }
 if ($TraceWorkload) { $variant += '-workload' }
 $out  = Join-Path $root "build\$variant"
@@ -66,7 +66,8 @@ $flags = @(
     "-I$root\cherryusb\port\fsdev"
 )
 if ($StandaloneEtm) { $flags += '-DTRACE_ETM_STANDALONE' }
-if ($CpuMHz -eq 48) { $flags += '-DTRACE_CPU_48MHZ' }
+if ($CpuMHz -eq 24) { $flags += '-DTRACE_CPU_24MHZ' }
+elseif ($CpuMHz -eq 48) { $flags += '-DTRACE_CPU_48MHZ' }
 else { $flags += '-DTRACE_CPU_72MHZ' }
 if ($TraceWorkload) { $flags += '-DTRACE_PATH_WORKLOAD' }
 

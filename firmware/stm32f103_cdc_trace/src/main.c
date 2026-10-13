@@ -29,10 +29,10 @@
 #include "SEGGER_RTT.h"
 #include "trace_workload.h"
 
-#if defined(TRACE_CPU_48MHZ) && defined(TRACE_CPU_72MHZ)
+#if (defined(TRACE_CPU_24MHZ) + defined(TRACE_CPU_48MHZ) + defined(TRACE_CPU_72MHZ)) > 1
 #error "Choose only one CPU clock profile"
 #endif
-#if defined(STM32F103xE) && !defined(TRACE_CPU_72MHZ) && !defined(TRACE_CPU_48MHZ)
+#if defined(STM32F103xE) && !defined(TRACE_CPU_72MHZ) && !defined(TRACE_CPU_48MHZ) && !defined(TRACE_CPU_24MHZ)
 #define TRACE_CPU_48MHZ
 #endif
 
@@ -333,7 +333,7 @@ void SystemClock_Config(void)
     RCC_OscInitStruct.HSIState = RCC_HSI_ON;
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
     RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-#ifdef TRACE_CPU_48MHZ
+#if defined(TRACE_CPU_48MHZ) || defined(TRACE_CPU_24MHZ)
     RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL6;
 #else
     RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
@@ -345,10 +345,16 @@ void SystemClock_Config(void)
     RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
                                   RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+#ifdef TRACE_CPU_24MHZ
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV2; /* PLL48 retains USB48, CPU24/TRACECLK12. */
+#else
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+#endif
     RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
     RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-#ifdef TRACE_CPU_48MHZ
+#ifdef TRACE_CPU_24MHZ
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK) {
+#elif defined(TRACE_CPU_48MHZ)
     if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK) {
 #else
     if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) {
@@ -358,7 +364,7 @@ void SystemClock_Config(void)
 
     /* USB 时钟固定为 48 MHz：72 MHz 档 PLL /1.5，48 MHz 档 PLL /1。 */
     PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB;
-#ifdef TRACE_CPU_48MHZ
+#if defined(TRACE_CPU_48MHZ) || defined(TRACE_CPU_24MHZ)
     PeriphClkInit.UsbClockSelection = RCC_USBCLKSOURCE_PLL;
 #else
     PeriphClkInit.UsbClockSelection = RCC_USBCLKSOURCE_PLL_DIV1_5;

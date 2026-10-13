@@ -44,6 +44,17 @@ test('F103 branch broadcast checkbox maps to bit 8 and restores its original val
     await t.restore();assert.equal(mem.get(0xe0041000),0x411);
   }finally{t.bus.close();}
 });
+test('fresh F103 programming opens the TPIU clock gate before awaiting acknowledgement',async()=>{
+  const {t,mem,writes}=target();const originalRead=t.read;
+  t.read=async a=>a===0xe0041010?((mem.get(0xe0042004)&0x20)&&(mem.get(0xe0041000)&0x400)?2:0):originalRead(a);
+  try{
+    await t.configure();
+    const gate=writes.findIndex(([a,v])=>a===0xe0042004&&(v&0xe0)===0xe0);
+    const programming=writes.findIndex(([a,v])=>a===0xe0041000&&(v&0x400));
+    assert.ok(gate>=0&&gate<programming);
+    await t.restore();assert.equal(mem.get(0xe0042004)&0xe0,0);
+  }finally{t.bus.close();}
+});
 test('inspection failure restores only the acquired DEMCR lease without programming an unknown ETM',async()=>{
   const {t,mem,writes}=target();try{mem.set(0xe00411e4,0);await assert.rejects(t.inspect(),/未识别到/);
     await t.restore();assert.ok(writes.every(([a])=>a===0xe000edfc));assert.equal(t.saved.size,0);

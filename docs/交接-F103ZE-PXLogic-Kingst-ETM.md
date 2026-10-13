@@ -4,6 +4,12 @@
 工程：`E:\web-etm-trace`  
 目标：STM32F103ZE（Cortex-M3，ETMv3），4 位并行 DDR Trace；用逻辑分析仪采集，后续解出 TPIU / ETM 指令执行流。
 
+## 2026-10-13 PXLogic 换线后已完成采集与 Web 解码分析
+
+已使用另一位 AI 的 `tools/la/pxlogic_la.py`，500 MSa/s、2.0 V、不加滤波，连续三轮10 ms真实采集与解码通过：185030 / 187254 / 188104条指令，overflow及包错误均为0，全部对应源码，并核对分支落点和线性指令连续性。页面8774可打开 `PXLogic · F103ZE · 48/24 MHz · 10 ms · C`。
+
+当前通过的是连续运行时的Python自由采集→Web导入分析；网页直接采集及PXLogic断点联动触发仍待适配和验收，不与Kingst联动混淆。配置/波形根因、复现命令、证据位置及限制见 [PXLogic-F103ZE采集解码验收](PXLogic-F103ZE采集解码验收.md)。下方旧实验失败记录保留作为过程证据。
+
 ## 2026-10-13 当前推荐：CDC 48/24 MHz，分支广播可选且默认关闭
 
 当前板上是普通 `firmware/stm32f103_cdc_trace/fw-ze.elf`，CPU/HCLK 48 MHz、TRACECLK 24 MHz。
