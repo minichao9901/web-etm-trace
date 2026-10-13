@@ -4,7 +4,21 @@
 工程：`E:\web-etm-trace`  
 目标：STM32F103ZE（Cortex-M3，ETMv3），4 位并行 DDR Trace；用逻辑分析仪采集，后续解出 TPIU / ETM 指令执行流。
 
-## 2026-10-13 最新进展：ETMv3 执行路径已解码验收
+## 2026-10-13 集成状态：F103ZE 已走通 Web → Kingst 联动
+
+当前操作说明以 [F103ZE-Web联动验收.md](F103ZE-Web联动验收.md) 为准；下面的独立固件解码章节保留为前序证据。
+当前板上普通固件是 `fw-ze-48-workload.elf`，CPU/HCLK 48 MHz、引脚 TRACECLK 24 MHz；**不是**独立开启 ETM 的 `fw-ze-standalone-48-workload.elf`。
+普通固件在 Web 配置之前没有 Trace 输出，这是预期行为。
+
+统一顺序：匹配 ELF → 连接识别 → 添加断点并选起点 → 填实际 HSE 8 MHz、核对时钟 → 配置 Kingst → 联动采集。
+服务入口为 http://127.0.0.1:8773/ 。本轮普通固件下三次实板采集已覆盖默认复位、无复位、再次复位，
+每轮恢复约 51,550 条指令记录、2 次 SysTick，包问题与 overflow 均为 0；探针已释放。
+
+另一位 AI 的 PXLogic CLI 和界面说明已复核并合入。记录保护、核验采样率与 CSV 时间轴一致性、密集跳变提取性能已补测。
+**Web 目前仍使用 Kingst**；PXLogic 的命令行位流/CSV 链已验证，触发、ready、停止/取消与真实 ETM 尚待验收，未接入 Web 联动。
+详见 [双 AI 交付集成验收.md](双AI交付集成验收.md) 与 [PXLogic-LA采集后端.md](PXLogic-LA采集后端.md)。
+
+## 前序进展：独立固件 ETMv3 执行路径解码验收
 
 最新结论以 [F103ZE-ETMv3-解码验收.md](F103ZE-ETMv3-解码验收.md) 为准，下面保留前序排查历史。
 Kingst 10 ms 原主循环记录恢复 189,669 条指令记录和 10 次 SysTick 中断；新的 2 ms 分支负载记录恢复 52,159 条指令记录。
