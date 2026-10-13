@@ -20,3 +20,9 @@ vendor/OpenCSD/
 vendor/OpenCSD-1.8.3/decoder/tests/
 vendor/*.zip
 vendor/opencsd-tree.json
+tmp/
+firmware/stm32f103_cdc_trace/fw-*.elf
+firmware/stm32f103_cdc_trace/fw-*.bin
+firmware/stm32f103_cdc_trace/fw-*.hex
+firmware/stm32f103_cdc_trace/**/*.orig
+firmware/stm32f103_cdc_trace/**/*.bak

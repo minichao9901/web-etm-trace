@@ -177,7 +177,7 @@ def main():
     for candidate in report['candidates']:
         print(f"phase{candidate['phase']}: {candidate['bytes']} bytes，FSYNC 候选 {candidate['frame_sync_matches']}")
     print(f'报告：{out}')
-    print('当前只恢复物理字节流；实际执行流需要后续 TPIU + ETMv4 解码。')
+    print('当前只恢复物理字节流；实际执行流需要后续 TPIU + ETM 解码。')
 
 
 if __name__ == '__main__':

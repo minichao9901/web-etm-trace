@@ -88,13 +88,15 @@ def byte_accounting(result):
         covered += max(0, stop - max(start, end))
         end = max(end, stop)
     types = Counter(p['text'].split(' : ')[0] for p in result['packets'])
-    unknown = sum(p['size'] for p in result['packets'] if p['text'].startswith('I_NOT_SYNC'))
+    not_sync = ('I_NOT_SYNC', 'NOTSYNC')
+    unknown = sum(p['size'] for p in result['packets'] if p['text'].startswith(not_sync))
+    unsync_records = sum(types[t] for t in not_sync)
     invalid = [p for p in result['packets'] if any(s in p['text'].upper() for s in ('BAD_', 'RESERVED', 'OVERFLOW', 'INCOMPLETE_EOT'))]
     unknown_execution = sum(e.get('executionState') == 'unknown' for e in result['events'])
     framing = result.get('framing', {})
     return dict(inputBytes=input_size,unprocessedBytes=max(0,input_size-size),processedBytes=size, accountedBytes=covered, overlapBytes=overlap,
                 unaccountedBytes=max(0, input_size-covered), unsynchronizedBytes=unknown,
-                unsynchronizedRecords=types['I_NOT_SYNC'], validPackets=len(result['packets'])-types['I_NOT_SYNC']-len(invalid),
+                unsynchronizedRecords=unsync_records, validPackets=len(result['packets'])-unsync_records-len(invalid),
                 packetIssues=len(invalid), overflowPackets=sum('OVERFLOW' in p['text'].upper() for p in invalid),
                 decoderLastError=result.get('status', {}).get('lastErrorCode', None),
                 unknownExecution=unknown_execution, initialPhysicalBytes=framing.get('initial_skipped_bytes'),

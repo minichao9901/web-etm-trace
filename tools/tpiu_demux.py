@@ -88,6 +88,7 @@ def main():
             'file': str(out.resolve()), 'bytes': len(buf),
             'first_64_bytes_hex': buf[:64].hex(' '),
             'etmv4_async_candidates': buf.count(bytes(11) + b'\x80'),
+            'etmv3_async_candidates': buf.count(bytes(5) + b'\x80'),
         }
     out = Path(str(prefix) + '.tpiu.json')
     out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')

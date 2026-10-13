@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ETMv4 包 → OpenCSD 指令范围 → Thumb 指令 → DWARF 源码位置。"""
+"""ETMv3/ETMv4 包 → OpenCSD 指令范围 → Thumb 指令 → DWARF 源码位置。"""
 import argparse
 import bisect
 import collections
@@ -20,6 +20,27 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = dict(idr0=0x080006E1, idr1=0x4100F401, idr2=4, idr8=1,
                       idr9=0, idr10=0, idr11=0, idr12=1, idr13=0, config=1, traceid=2)
 REG_ORDER = list(DEFAULT_CONFIG)
+V3_REG_ORDER = ['idr', 'ctrl', 'ccer', 'traceid']
+
+
+def decoder_config(config=None):
+    config = dict(config or {})
+    protocol = config.get('protocol', 'ETMv4')
+    if protocol == 'ETMv3':
+        missing = set(V3_REG_ORDER) - set(config)
+        if missing:
+            raise ValueError('ETMv3 配置缺少寄存器：' + ', '.join(sorted(missing)))
+        if (int(config['idr']) >> 8) & 15 != 2:
+            raise ValueError('ETM IDR 架构不是 v3。')
+    elif protocol == 'ETMv4':
+        config = {**DEFAULT_CONFIG, **config}
+        if (int(config['idr1']) >> 8) & 15 != 4:
+            raise ValueError('ETM 架构不是 v4。')
+    else:
+        raise ValueError('不支持的 Trace 协议：' + str(protocol))
+    if not 1 <= int(config['traceid']) <= 0x6F:
+        raise ValueError('无效 trace ID。')
+    return config
 
 
 def string(value):
@@ -111,18 +132,17 @@ class Image:
 def decode(id_stream, elf, workdir, config=None, sources=None):
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    config = {**DEFAULT_CONFIG, **(config or {})}
-    if (int(config['idr1']) >> 8) & 15 != 4:
-        raise ValueError('ETM 架构不是 v4。')
-    if not 1 <= int(config['traceid']) <= 0x6F:
-        raise ValueError('无效 trace ID。')
+    config = decoder_config(config)
+    protocol = config.get('protocol', 'ETMv4')
     image = Image(elf, sources)
     native = ROOT / 'build-native/etm_decode.exe'
     if not native.exists():
         raise ValueError('缺少 OpenCSD 解码器，请先运行 build-decoder.ps1。')
     input_file = workdir / 'etm.bin'
     input_file.write_bytes(id_stream)
-    manifest = '\n'.join(hex(int(config[k])) for k in REG_ORDER) + '\n'
+    order = V3_REG_ORDER if protocol == 'ETMv3' else REG_ORDER
+    manifest = ('ETMv3\n' if protocol == 'ETMv3' else '')
+    manifest += '\n'.join(hex(int(config[k])) for k in order) + '\n'
     for index, (base, data) in enumerate(image.segments):
         file = workdir / f'image-{index}.bin'
         file.write_bytes(data)
@@ -176,7 +196,7 @@ def decode(id_stream, elf, workdir, config=None, sources=None):
     source_data = {f: image.source(f) for f in sorted(source_files)}
     instruction_count = sum(e['kind'] == 'instruction' for e in events)
     faults = [p for p in packets if any(term in p['text'].upper() for term in ('OVERFLOW', 'BAD_SEQUENCE', 'BAD_TRACEMODE', 'RESERVED'))]
-    result = dict(version=1, protocol='ETMv4', config=config,inputBytes=len(id_stream),
+    result = dict(version=1, protocol=protocol, config=config,inputBytes=len(id_stream),
                 elf=dict(name=Path(elf).name, sha256=hashlib.sha256(image.bytes).hexdigest()),
                 packets=packets, elements=elements, events=events, sources=source_data,
                 summary=dict(packets=len(packets), ranges=sum(e['type'] == 5 for e in elements),
@@ -191,7 +211,7 @@ def decode(id_stream, elf, workdir, config=None, sources=None):
 
 def decode_capture(path, elf, workdir, config=None, sources=None, fraction=.25, clock=0, data=None):
     path, workdir = Path(path), Path(workdir)
-    config = {**DEFAULT_CONFIG, **(config or {})}
+    config = decoder_config(config)
     physical = None
     if path.suffix.lower() == '.csv':
         physical, candidates = extract(path, clock, data or [1, 2, 3, 4], fraction)
@@ -228,7 +248,7 @@ def export_source(result, simplified=False):
     if simplified:
         from source_export import simplified_c
         return simplified_c(result)
-    lines = ['/* ETMv4 源码执行流记录：按实际恢复顺序排列，不是可编译程序。 */']
+    lines = [f"/* {result.get('protocol', 'ETMv4')} 源码执行流记录：按实际恢复顺序排列，不是可编译程序。 */"]
     if result.get('quality',{}).get('unprocessedBytes'):
         lines.append(f"/* 另有 {result['quality']['unprocessedBytes']} 字节 ETM 输入未处理；缺失的执行路径保持未知。 */")
     last = None

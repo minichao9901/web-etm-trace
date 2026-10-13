@@ -33,7 +33,7 @@ def simplified_rows(result):
 
 def simplified_c(result):
     clean=lambda text:str(text).replace('*/','* /')
-    lines=['/* ETMv4 简化源码执行流：按恢复顺序排列，不是可编译程序。 */']
+    lines=[f"/* {result.get('protocol','ETMv4')} 简化源码执行流：按恢复顺序排列，不是可编译程序。 */"]
     if result.get('exportRange'):lines.append('/* 导出执行序号区间 '+str(result['exportRange'])+'；不是微秒时间区间。 */')
     if result.get('quality',{}).get('unprocessedBytes'):lines.append('/* ETM 输入仍有未处理字节，缺失路径保持未知。 */')
     rows=simplified_rows(result)

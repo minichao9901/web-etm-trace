@@ -28,7 +28,7 @@ export class HistoryView{
     this.setLoading(true);$('summary-content').replaceChildren();
     try{
     const revision=++this.revision;const r=await this.api(this.path('overview'));if(revision!==this.revision)return;
-    this.result=r;$('record-description').textContent=(r.name||name||sid)+' · ELF '+r.elf.sha256.slice(0,12);
+    this.result=r;document.querySelector('[data-view="packets"]').textContent=(r.protocol||'ETMv4')+' 包';$('record-description').textContent=(r.name||name||sid)+' · ELF '+r.elf.sha256.slice(0,12);
     $('records').title=$('record-description').textContent;
     $('metrics').textContent=n(r.summary.instructions)+' 路径 · '+n(r.quality.validPackets)+' 包 · '+r.summary.exceptions+' 中断';
     $('quality').textContent=`${r.targetVerified?'采集时镜像已核对':'未记录采集时镜像核对'} · 未知条件 ${r.quality.unknownExecution} 条 · 包问题 ${r.quality.packetIssues} · overflow ${r.quality.overflowPackets}`+(r.status.lastErrorCode?' · 解码器错误 '+r.status.lastErrorCode:'')+(r.quality.unprocessedBytes?' · 未处理 '+r.quality.unprocessedBytes+' 字节':'')+' · 捕获边界保留';

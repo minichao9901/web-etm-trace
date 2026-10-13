@@ -18,7 +18,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory, abort
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'tools'))
 sys.path.insert(0, str(ROOT / 'tools/la'))
-from decode_trace import DEFAULT_CONFIG, Image, decode_capture, export_source
+from decode_trace import DEFAULT_CONFIG, Image, decode_capture, export_source, decoder_config
 from flow_analysis import enrich
 from kingst_la import Vis, do_export, read_glitch_settings
 from record_store import RecordStore
@@ -454,7 +454,7 @@ def import_record():
             raise ValueError('导入原始采集需要配套 ELF。')
         request.files['elf'].save(folder / 'firmware.elf')
         config = json.loads(request.form.get('config', '{}'))
-        m = dict(input=filename, name=uploaded.filename, config={**DEFAULT_CONFIG, **config},
+        m = dict(input=filename, name=uploaded.filename, config=decoder_config(config),
                  configBasis='user-provided', fraction=float(request.form.get('fraction', .25)))
         sources = {}
         for file in request.files.getlist('sources'):

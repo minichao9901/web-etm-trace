@@ -19,20 +19,29 @@ static std::string quote(const char *text) {
     }
     s << '"'; return s.str();
 }
+static ocsd_trace_protocol_t packet_protocol = OCSD_PROTOCOL_ETMV4I;
 static ocsd_datapath_resp_t element(const void *, ocsd_trc_index_t index, uint8_t id, const ocsd_generic_trace_elem *e) {
     char text[2048] = {0}; ocsd_gen_elem_str(e,text,sizeof(text));
+    const bool range=e->elem_type==OCSD_GEN_TRC_ELEM_INSTR_RANGE || e->elem_type==OCSD_GEN_TRC_ELEM_I_RANGE_NOPATH;
+    const bool exception=e->elem_type==OCSD_GEN_TRC_ELEM_EXCEPTION;
+    uint32_t payload=0;
+    if(range) payload=e->num_instr_range;
+    else if(exception) payload=e->exception_number;
+    else if(e->elem_type==OCSD_GEN_TRC_ELEM_NO_SYNC || e->elem_type==OCSD_GEN_TRC_ELEM_EO_TRACE) payload=e->unsync_eot_info;
+    else if(e->elem_type==OCSD_GEN_TRC_ELEM_TRACE_ON) payload=e->trace_on_reason;
     std::cout << "{\"kind\":\"element\",\"offset\":" << index << ",\"id\":" << (unsigned)id
-      << ",\"type\":" << (int)e->elem_type << ",\"start\":" << e->st_addr << ",\"end\":" << e->en_addr
-      << ",\"isa\":" << (int)e->isa << ",\"flags\":" << e->flag_bits
-      << ",\"cycleCount\":" << e->cycle_count << ",\"timestamp\":" << e->timestamp
-      << ",\"lastExecuted\":" << e->last_instr_exec << ",\"lastConditional\":" << e->last_instr_cond
-      << ",\"lastType\":" << (int)e->last_i_type << ",\"lastSubtype\":" << (int)e->last_i_subtype
-      << ",\"payload\":" << e->num_instr_range << ",\"text\":" << quote(text) << "}\n";
+      << ",\"type\":" << (int)e->elem_type << ",\"start\":" << ((range || e->elem_type==OCSD_GEN_TRC_ELEM_ADDR_NACC)?e->st_addr:0)
+      << ",\"end\":" << ((range || (exception && e->excep_ret_addr))?e->en_addr:0)
+      << ",\"isa\":" << (range?(int)e->isa:0) << ",\"flags\":" << e->flag_bits
+      << ",\"cycleCount\":" << (e->has_cc?e->cycle_count:0) << ",\"timestamp\":" << ((e->has_ts || e->elem_type==OCSD_GEN_TRC_ELEM_TIMESTAMP)?e->timestamp:0)
+      << ",\"lastExecuted\":" << (range?e->last_instr_exec:0) << ",\"lastConditional\":" << (range?e->last_instr_cond:0)
+      << ",\"lastType\":" << (range?(int)e->last_i_type:0) << ",\"lastSubtype\":" << (range?(int)e->last_i_subtype:0)
+      << ",\"payload\":" << payload << ",\"text\":" << quote(text) << "}\n";
     return OCSD_RESP_CONT;
 }
 static void packet(const void *, ocsd_datapath_op_t op, ocsd_trc_index_t index, const void *pkt, uint32_t size, const uint8_t *data) {
     if(op!=OCSD_OP_DATA || !pkt) return;
-    char text[2048]={0}; ocsd_pkt_str(OCSD_PROTOCOL_ETMV4I,pkt,text,sizeof(text));
+    char text[2048]={0}; ocsd_pkt_str(packet_protocol,pkt,text,sizeof(text));
     std::ostringstream hex;
     for(uint32_t i=0;i<size;i++) hex << std::hex << std::setw(2) << std::setfill('0') << (unsigned)data[i];
     std::cout << "{\"kind\":\"packet\",\"offset\":" << index << ",\"size\":" << size
@@ -49,8 +58,12 @@ int main(int argc,char **argv) {
     dcd_tree_handle_t tree=0;
     try {
         std::ifstream config(argv[2]); if(!config) throw std::runtime_error("Cannot read config");
-        uint32_t regs[11]; std::string value;
-        for(unsigned i=0;i<11;i++) { if(!(config>>value)) throw std::runtime_error("Missing register"); regs[i]=std::stoul(value,0,0); }
+        uint32_t regs[11]={0}; std::string value;
+        if(!(config>>value)) throw std::runtime_error("Missing protocol/register");
+        const bool v3=value=="ETMv3";
+        unsigned first=0;
+        if(!v3) { regs[0]=std::stoul(value,0,0); first=1; }
+        for(unsigned i=first;i<(v3?4u:11u);i++) { if(!(config>>value)) throw std::runtime_error("Missing register"); regs[i]=std::stoul(value,0,0); }
         ocsd_etmv4_cfg c={};
         c.reg_idr0=regs[0]; c.reg_idr1=regs[1]; c.reg_idr2=regs[2];
         c.reg_idr8=regs[3]; c.reg_idr9=regs[4]; c.reg_idr10=regs[5]; c.reg_idr11=regs[6]; c.reg_idr12=regs[7]; c.reg_idr13=regs[8];
@@ -58,7 +71,15 @@ int main(int argc,char **argv) {
         tree=ocsd_create_dcd_tree(OCSD_TRC_SRC_SINGLE,0); if(!tree) throw std::runtime_error("No decode tree");
         check(ocsd_dt_set_gen_elem_outfn(tree,element,0));
         unsigned char id=0;
-        check(ocsd_dt_create_decoder(tree,OCSD_BUILTIN_DCD_ETMV4I,OCSD_CREATE_FLG_FULL_DECODER,&c,&id));
+        if(v3) {
+            ocsd_etmv3_cfg c3={};
+            c3.reg_idr=regs[0]; c3.reg_ctrl=regs[1]; c3.reg_ccer=regs[2]; c3.reg_trc_id=regs[3];
+            c3.arch_ver=ARCH_V7; c3.core_prof=profile_CortexM;
+            packet_protocol=OCSD_PROTOCOL_ETMV3;
+            check(ocsd_dt_create_decoder(tree,OCSD_BUILTIN_DCD_ETMV3,OCSD_CREATE_FLG_FULL_DECODER,&c3,&id));
+        } else {
+            check(ocsd_dt_create_decoder(tree,OCSD_BUILTIN_DCD_ETMV4I,OCSD_CREATE_FLG_FULL_DECODER,&c,&id));
+        }
         check(ocsd_dt_attach_packet_callback(tree,id,OCSD_C_API_CB_PKT_MON,(void *)packet,0));
         std::vector<std::vector<uint8_t> > images;
         while(config>>value) {
