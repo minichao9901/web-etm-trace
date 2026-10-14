@@ -33,6 +33,13 @@ def waveform(path, payload, initial_clock, prefix=None, delays=(7,)):
 
 
 class TracePortTests(unittest.TestCase):
+    def test_utf16_bom_exports_keep_the_same_ddr_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'utf16.csv';payload=b'\xff\xff\xff\x7f'+bytes(range(16))
+            waveform(path,payload,0);text=path.read_text(encoding='utf-8-sig')
+            for encoding,bom in [('utf-16-le',b'\xff\xfe'),('utf-16-be',b'\xfe\xff')]:
+                with self.subTest(encoding=encoding):
+                    path.write_bytes(bom+text.encode(encoding));_,candidates=extract(path,0,[1,2,3,4]);self.assertEqual(candidates[0],payload)
     def test_payload_from_both_initial_clock_levels_and_byte_phases(self):
         payload = b'\xff\xff\xff\x7f' + bytes(range(256)) + b'\xff\xff\xff\x7f'
         with tempfile.TemporaryDirectory() as directory:
