@@ -250,7 +250,7 @@ def record_elf(sid):
     info=elf_info(directory(sid)/'firmware.elf')
     profile=next((key for key,(_,path) in PROFILES.items() if (ROOT/'firmware'/path).exists()
                   and hashlib.sha256((ROOT/'firmware'/path).read_bytes()).hexdigest()==info['sha256']),None)
-    return jsonify(**info,elfId=sid,profile=profile,download='/api/record-firmware/'+sid)
+    return jsonify(**info,elfId=sid,profile=profile,download=request.script_root+'/api/record-firmware/'+sid)
 
 
 @app.get('/api/record-firmware/<sid>')
@@ -267,7 +267,7 @@ def select_profile(key):
     folder=directory(sid)
     folder.mkdir()
     (folder/'firmware.elf').write_bytes(source.read_bytes())
-    return jsonify(**info,elfId=sid,title=title,download='/api/profile-firmware/'+key)
+    return jsonify(**info,elfId=sid,title=title,download=request.script_root+'/api/profile-firmware/'+key)
 
 
 @app.get('/api/profile-firmware/<key>')
