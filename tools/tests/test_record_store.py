@@ -20,6 +20,15 @@ class StoreTests(unittest.TestCase):
         (self.folder/'decoded.json').write_text(json.dumps(self.data),encoding='utf8')
         self.store=RecordStore(self.folder,lambda:copy.deepcopy(self.data))
     def tearDown(self):self.tmp.cleanup()
+    def test_rebuild_waits_for_an_existing_windows_reader_to_close(self):
+        import threading,sqlite3,time
+        self.store.ensure();ready=threading.Event()
+        def reader():
+            db=sqlite3.connect(self.store.path);db.execute('SELECT * FROM meta').fetchall();ready.set();time.sleep(.3);db.close()
+        worker=threading.Thread(target=reader);worker.start();self.assertTrue(ready.wait(2))
+        (self.folder/'decoded.json').write_text(json.dumps(self.data)+' ',encoding='utf8')
+        try:self.store.ensure();self.assertTrue(self.store.ready())
+        finally:worker.join(2)
     def test_navigation_and_unknown_boundary_do_not_stitch_stacks(self):
         self.assertEqual(self.store.navigate(0,1,'call')['seq'],1)
         self.assertEqual(self.store.navigate(2,1,'return')['seq'],3)

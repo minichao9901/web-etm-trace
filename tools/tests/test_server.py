@@ -1,4 +1,5 @@
 import io
+import os
 import hashlib
 import json
 import sys
@@ -27,7 +28,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual({r['id'] for r in records},{demo,'manual','early'})
 
     def test_etm_serves_its_committed_source_store_copy(self):
-        upstream=ROOT.parent/'web-serial-rtt-tools/app/dbg/source.js'
+        upstream=Path(os.environ.get('SERIAL_ROOT',str(ROOT.parent/'web-serial-rtt-tools')))/'app/dbg/source.js'
         bundled=ROOT/'web/app/shared/dbg/source.js'
         self.assertEqual(bundled.read_bytes(),upstream.read_bytes())
         response=self.client.get('/app/shared/dbg/source.js')
@@ -103,9 +104,17 @@ class ServerTests(unittest.TestCase):
         self.folder.cleanup()
 
     def test_record_package_reload_decode_and_export(self):
+        elf_path=ROOT/'firmware/stm32h7b0_etm_board_v1/fw.elf'
+        image=server.Image(elf_path);sources=[]
+        # A worktree differs from the compile-time DWARF root. Supply source
+        # snapshots as the web UI does, rather than depending on that old root.
+        for file in sorted({file for _,file,_ in image.lines.values() if file}):
+            relative=file.replace('\\','/').split('/firmware/',1)
+            local=ROOT/'firmware'/relative[-1]
+            if len(relative)==2 and local.is_file():sources.append((io.BytesIO(local.read_bytes()),file))
         response = self.client.post('/api/import', data={
             'capture': (io.BytesIO((ROOT / 'captures/trace-20261011-000319.csv').read_bytes()), 'trace.csv'),
-            'elf': (io.BytesIO((ROOT / 'firmware/stm32h7b0_etm_board_v1/fw.elf').read_bytes()), 'fw.elf')})
+            'elf': (io.BytesIO(elf_path.read_bytes()), 'fw.elf'),'sources':sources})
         self.assertEqual(response.status_code, 200, response.json)
         sid = response.json['record']
         jid = self.client.post('/api/decode/' + sid).json['job']
