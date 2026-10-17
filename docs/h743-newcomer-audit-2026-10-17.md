@@ -110,3 +110,63 @@ clone 下来 2032 个文件，关键项：
 4. README 里把"ETM 在 `/etm/`"、"必须填 HSE"、"浏览器占用探针时不能烧录"三条写进快速上手。
 5. 在仓库里放一个 H743 的示例固件 + ELF（或从 `web-etm-trace` 同步一份），让客户能立刻看到效果。
 
+## 五、修复与复测结果（2026-10-17 19:10 更新）
+
+### 5.1 那个"未命中本页断点"已定因并修复（提交 `66b758e`）
+
+补诊断后拿到的确切数据（`target.js` 抛错前打印 PC/DFSR/DHCSR/DEMCR/同地址断点状态）：
+
+```
+PC 0x08000B50   ← 正是业务起点 trace_hook_entry
+DFSR 0x00000003 ← bit0 断点命中 + bit1 BKPT
+DHCSR 0x00030003 ← S_HALT=1
+同地址断点：0x08000B50(未租用)
+```
+
+**根因**：`target.reset({address})` 为了"复位后停在业务起点"，会临时在入口装一个 FPB 比较器，
+并在 cleanup 里 `clearEntryBreak()` 摘掉；但**这颗探针的 PPB 写偶发丢失**（本项目文档记过），
+比较器残留 → 放行瞬间又命中同一地址 → `run()` 判"仍暂停"，而该地址的页面断点已被 `suspend()`
+（未租用）→ 落到"未命中本页断点"分支，**采集永远起不来**（连续 3 次可复现）。
+
+**修法**：`run()` 增加防御性自愈 `clearStaleComparator(pc)` —— 按 `FP_CTRL` 现场回读比较器
+个数/版本，找出与该地址匹配（忽略 match 位与使能位）的残留比较器，写 0 并**回读确认**（失败补一次），
+然后重新放行一次；仍跑不起来才抛错。抛错信息里保留全部诊断字段。
+
+### 5.2 复测：独立包反复启动 **3/3 稳定**
+
+用**重新构建的包**（`sourceRevision=66b758e`，解压到 `E:\web-etm-package-test`，包自带 bridge 跑在 8878）：
+
+| 次 | 时间 | 指令 | 溢出/包问题 | gaps |
+|---:|---|---:|---:|---:|
+| 1 | 19:01:29 | 945,686 | **0 / 0** | 1 |
+| 2 | 19:04:17 | 945,677 | **0 / 0** | 1 |
+| 3 | 19:07:25 | 945,677 | **0 / 0** | 1 |
+
+每轮都完整走了 **载 ELF → 连探针 → 加断点选起点 → 核时钟（HSE=25）→ 联动采集 → 解码 → 记录已保存**。
+指令数几乎完全一致（945,677 出现两次）= 采集链路是**确定性**的，不是"碰运气跑通"。
+
+### 5.3 磁盘教训（重要，会重复踩）
+
+清理 trace 数据时**不能整目录删 `records/`**：`baselines/spi-70-35-v1/manifest.json` 的
+`previewRecord` 指向 `records/capture-926a4f2b…`，`sync-etm-runtime.py` 要拿它的 `decoded.json`
+做内置 Demo；删了之后 `sync` 直接 `FileNotFoundError`，`build-etm-package.py` 跟着报
+「ETM 快照与来源清单不一致」。
+
+- 本次已从工具箱的验证副本
+  `docs/validation/20261016-web-review-062721/etm-records/demo-spi-70-35-v1/`（其
+  `spi-validation.json` 里 record 正是该 ID，逐字节同源）**恢复**到 `records/capture-926a4f2b…/`。
+- 以后清理：`records/` 里**只删时间戳早于最后一个 baseline 的**，或先跑一次
+  `sync-etm-runtime.py` 确认能过再删。`captures/` 可以放心删（不在任何清单里）。
+
+### 5.4 桥包发布流程（补一条）
+
+`build-etm-package.py` 打的是**工具箱里的快照** `bridge/etm/backend/**`，不会自动从
+`web-etm-trace` 取最新代码。**改了 ETM 网页必须两步**：
+
+```powershell
+python tools/dev/sync-etm-runtime.py --etm-root E:\web-etm-trace
+python tools/dev/build-etm-package.py
+```
+
+（本次就是因为漏了第一步，第一版重建出来的包内 `dap-webusb.js` 还是旧代码。）
+
