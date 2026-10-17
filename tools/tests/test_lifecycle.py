@@ -7,11 +7,28 @@ import server
 import kingst_la
 
 class LifecycleTests(unittest.TestCase):
+    def test_interrupted_decode_is_not_shown_as_an_old_success(self):
+        sid='interrupted-stream';server.save(sid,dict(input='capture.bin'))
+        folder=server.directory(sid);(folder/'decoded.json').write_text('{}')
+        (folder/'decode-in-progress.json').write_text('{}')
+        client=server.app.test_client()
+        response=client.get('/api/browse/'+sid+'/overview')
+        self.assertEqual(response.status_code,409);self.assertIn('上次解码未完成',response.json['error'])
+        row=next(r for r in client.get('/api/records').json if r['id']==sid)
+        self.assertFalse(row['decoded'])
+    def test_record_gate_allows_parallel_readers_but_excludes_a_writer(self):
+        gate=server.RecordGate()
+        self.assertTrue(gate.try_read());self.assertTrue(gate.try_read())
+        self.assertFalse(gate.try_write())
+        gate.end_read();gate.end_read()
+        with gate.write():
+            self.assertFalse(gate.try_read());self.assertFalse(gate.try_write())
+        self.assertTrue(gate.try_read());gate.end_read()
     def test_decoding_sidecars_are_not_exposed_as_a_mixed_record_and_jobs_remain_readable(self):
         import threading
         ready=threading.Event();release=threading.Event();sid='guarded-record'
         def writer():
-            with server.record_guard(sid):ready.set();release.wait(3)
+            with server.record_guard(sid).write():ready.set();release.wait(3)
         thread=threading.Thread(target=writer);thread.start();self.assertTrue(ready.wait(1))
         jid=server.new_job(sid,'decoding')
         try:

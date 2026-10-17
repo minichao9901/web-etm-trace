@@ -288,7 +288,7 @@ def export_simplified_stream(workdir, out_path):
     clean = lambda text: str(text).replace('*/', '* /')          # noqa: E731
 
     files, seen = [], set()
-    for event in JsonLines(events,0):
+    for event in JsonLines(events,None):
         f = event.get('file')
         if f and f not in seen:
             seen.add(f)
@@ -302,7 +302,7 @@ def export_simplified_stream(workdir, out_path):
             out.write('/* 配套文件：' + clean(base(f)) + ' = ' + clean(f) + ' */\n')
         last = None
         context = None
-        for event in JsonLines(events,0):
+        for event in JsonLines(events,None):
             seq = event.get('seq', rows)
             if event.get('kind') != 'instruction':
                 if event.get('type') in (1, 2, 3, 6, 7, 8, 9, 10):

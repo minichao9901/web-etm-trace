@@ -12,6 +12,10 @@ from decode_stream import export_simplified_stream
 
 
 class StreamStoreTests(unittest.TestCase):
+    def test_valid_jsonl_prefix_is_not_accepted_as_a_complete_stream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p=Path(directory)/'events.jsonl';p.write_text('{}\n')
+            with self.assertRaisesRegex(ValueError,'记录数不一致'):list(JsonLines(p,2))
     def test_native_path_follows_portable_runtime_selection_after_import(self):
         from unittest.mock import patch
         import decode_trace

@@ -14,6 +14,7 @@ import uuid
 import zipfile
 from urllib.parse import urlsplit
 from pathlib import Path
+from contextlib import contextmanager
 
 from flask import Flask, jsonify, request, send_file, send_from_directory, abort, g
 
@@ -72,23 +73,56 @@ def directory(sid):
     return RECORDS / sid
 
 
+class RecordGate:
+    def __init__(self):
+        self.condition=threading.Condition();self.readers=0;self.writer=False;self.waiting=0
+    def try_read(self):
+        with self.condition:
+            if self.writer or self.waiting:return False
+            self.readers+=1;return True
+    def end_read(self):
+        with self.condition:
+            self.readers-=1;self.condition.notify_all()
+    def try_write(self):
+        with self.condition:
+            if self.writer or self.readers or self.waiting:return False
+            self.writer=True;return True
+    def end_write(self):
+        with self.condition:self.writer=False;self.condition.notify_all()
+    @contextmanager
+    def write(self):
+        with self.condition:
+            self.waiting+=1
+            try:
+                self.condition.wait_for(lambda:not self.writer and not self.readers)
+                self.writer=True
+            finally:self.waiting-=1
+        try:yield
+        finally:self.end_write()
+
 _record_locks={}
 def record_guard(sid):
-    with lock:return _record_locks.setdefault(sid,threading.RLock())
+    with lock:return _record_locks.setdefault(sid,RecordGate())
 
 @app.before_request
 def decoded_record_guard():
     sid=(request.view_args or {}).get('sid')
     if sid and request.endpoint!='start_decode':
-        guard=record_guard(sid)
-        if not guard.acquire(blocking=False):
+        guard=record_guard(sid);write=request.method!='GET'
+        if not (guard.try_write() if write else guard.try_read()):
             return jsonify(error='该记录正在解码或更新索引，请等待当前任务完成后重试；原始采集保留'),409
-        g.decoded_record_guard=guard
+        g.decoded_record_guard=(guard,write)
+        needs_result=request.endpoint.startswith('browse_') or request.endpoint in ('get_record','attach_sources') or request.endpoint=='download' and request.view_args.get('kind') not in ('raw','kvdat','record')
+        if needs_result and (directory(sid)/'decode-in-progress.json').exists():
+            return jsonify(error='上次解码未完成，请重新解码；原始采集与ELF仍保留'),409
 
 @app.teardown_request
 def release_decoded_record_guard(error):
-    guard=g.pop('decoded_record_guard',None)
-    if guard is not None:guard.release()
+    held=g.pop('decoded_record_guard',None)
+    if held:
+        guard,write=held
+        if write:guard.end_write()
+        else:guard.end_read()
 
 
 def save(sid, metadata):
@@ -413,7 +447,7 @@ def records():
     for file in RECORDS.glob('*/session.json'):
         row = meta(file.parent.name)
         sid=file.parent.name
-        rows.append({**row, 'id':sid,'recordKind':record_kind(sid,row,demo),'decoded': (file.parent / 'decoded.json').exists()})
+        rows.append({**row, 'id':sid,'recordKind':record_kind(sid,row,demo),'decoded': (file.parent / 'decoded.json').exists() and not (file.parent/'decode-in-progress.json').exists()})
     return jsonify(sorted(rows, key=lambda r: r.get('created', 0), reverse=True))
 
 
@@ -497,8 +531,16 @@ def capture_start_info(events,metadata):
 
 
 def decode_job(jid,sid):
-    with record_guard(sid):summary=_decode_job(jid,sid)
-    if summary is not None:change(jid,state='done',summary=summary)
+    change(jid,state='decoding')
+    try:
+        with record_guard(sid).write():
+            marker=directory(sid)/'decode-in-progress.json'
+            save_json(marker,dict(started=time.time(),job=jid))
+            summary=_decode_job(jid,sid)
+            if summary is not None:marker.unlink(missing_ok=True)
+        if summary is not None:change(jid,state='done',summary=summary)
+    except (Exception,SystemExit) as error:
+        record_failure(sid,error,'decode');change(jid,state='error',error=str(error))
 
 def _decode_job(jid, sid):
     try:
