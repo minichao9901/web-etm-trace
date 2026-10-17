@@ -6,6 +6,9 @@
 #include "usbd_core.h"
 #include "usb_dwc2_reg.h"
 #include "usb_dwc2_param.h"
+/* TRDT（USB 转向时间）必须按 AHB/HCLK 查表，需要 HAL 的 HCLK 查询。
+ * 见 dwc2_set_turnaroundtime() 的调用点。 */
+#include "stm32h7xx_hal.h"
 
 #define USBD_BASE (g_usbdev_bus[busid].reg_base)
 
@@ -216,10 +219,14 @@ static void dwc2_set_turnaroundtime(uint8_t busid, uint32_t hclk, uint8_t speed)
         } else if ((hclk >= 27700000U) && (hclk < 32000000U)) {
             /* hclk Clock Range between 27.7-32 MHz */
             UsbTrd = 0x7U;
-        } else /* if(hclk >= 32000000) */
-        {
+        } else if (hclk >= 32000000U) {
             /* hclk Clock Range between 32-200 MHz */
             UsbTrd = 0x6U;
+        } else {
+            /* 低于 14.2 MHz：ST 表里没有合法档位（USB FS 的下限就是 14.2 MHz），
+             * 这里取最慢档 0xF 尽量撑住；掉进上面的 0x6 会把 AHB 当 200MHz 用，
+             * 那是必然失败的配置。 */
+            UsbTrd = 0xFU;
         }
     } else if (speed == USB_OTG_SPEED_HIGH) {
         UsbTrd = USBD_HS_TRDT_VALUE;
@@ -1192,7 +1199,18 @@ process_setup:
         }
         if (gint_status & USB_OTG_GINTSTS_ENUMDNE) {
             USB_OTG_GLB->GINTSTS = USB_OTG_GINTSTS_ENUMDNE;
-            dwc2_set_turnaroundtime(busid, usbd_dwc2_get_system_clock(), dwc2_get_devspeed(busid));
+            /* TRDT 必须按 AHB/HCLK 查表，不是 CPU 频率。
+             * 原来传的是 usbd_dwc2_get_system_clock()（= SystemCoreClock = CPU 频率）：
+             * HPRE=1 时两者相等才碰巧对；一旦 AHB 分频（HCLK=CPU/2、/4…）就会算出
+             * 过小的 TRDT，DWC2 对 IN 令牌应答过快，主机侧表现为枚举失败/传输超时。
+             * H7_DWC2_TRDT_FROM_CORE=1 可退回旧行为，用于 A/B 对照。 */
+#if H7_DWC2_TRDT_FROM_CORE
+            dwc2_set_turnaroundtime(busid, usbd_dwc2_get_system_clock(),
+                                    dwc2_get_devspeed(busid));
+#else
+            dwc2_set_turnaroundtime(busid, HAL_RCC_GetHCLKFreq(),
+                                    dwc2_get_devspeed(busid));
+#endif
 
             USB_OTG_DEV->DCTL |= USB_OTG_DCTL_CGINAK;
 

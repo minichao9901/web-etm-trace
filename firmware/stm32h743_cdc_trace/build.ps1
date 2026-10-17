@@ -11,6 +11,10 @@ param(
     [ValidateSet('480', '240', '120', '100', '90', '80', '70', '60', '50', '45', '40', '35', '30', '25')][string]$CoreMHz = '480',
     [ValidateSet(0, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 128)][int]$TraceR = 0,
     [ValidateSet('External', 'Internal')][string]$UsbSupply = 'External',
+    # AHB/HCLK 分频（测试"AHB 太低 USB 不工作"）：HCLK = SYSCLK / AhbDiv
+    [ValidateSet(1, 2, 4, 8, 16)][int]$AhbDiv = 1,
+    # TRDT 用哪个频率算：Hclk=按 AHB 查表（正确）；Core=沿用 SystemCoreClock（旧行为，A/B 用）
+    [ValidateSet('Hclk', 'Core')][string]$Trdt = 'Hclk',
     [string]$Gcc
 )
 $ErrorActionPreference = 'Stop'
@@ -50,6 +54,8 @@ if ($CoreMHz -eq '480') {
 }
 # 物理 TRACECLK = VCO / R / 2
 $h7TraceMHz = (25000000 / $h7M) * $h7N / $h7R / 2 / 1000000
+# AHB 分频覆盖（默认取档位自带的 HPRE）
+if ($AhbDiv -gt 1) { $h7HPRE = "RCC_HCLK_DIV$AhbDiv" }
 
 $h7Flags = @(
     '-mcpu=cortex-m7', '-mthumb', '-mfpu=fpv5-d16', '-mfloat-abi=hard',
@@ -62,6 +68,7 @@ $h7Flags = @(
     "-DH7_CDC_PLL_M=$h7M", "-DH7_CDC_PLL_N=$h7N", "-DH7_CDC_PLL_P=$h7P", "-DH7_CDC_PLL_R=$h7R",
     "-DH7_CDC_D1CPRE=$h7D1CPRE", "-DH7_CDC_HPRE=$h7HPRE", "-DH7_CDC_FLASH_LATENCY=$h7Lat",
     "-DH7_CDC_USB_INTERNAL_REGULATOR=$h7UsbReg",
+    "-DH7_DWC2_TRDT_FROM_CORE=$([int]($Trdt -eq 'Core'))",
     # SEGGER RTT 控制块固定到 .rtt_cb（链接脚本把它放在 DTCM 0x20002000）
     '-DRTT_CB_ATTR=__attribute__((section(".rtt_cb"),aligned(4)))',
     "-I$h7Root\src",

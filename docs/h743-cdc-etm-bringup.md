@@ -268,7 +268,60 @@ python -X utf8 server.py --port 8766          # 本地服务
 - `captures/h743-sweep/30mhz/web-page-decode.png` —— 页面截图（记录名 / 12,470 条 /
   函数轨迹 `main 10,576 · HAL_IncTick 14 · SysTick_Handler 6` / 执行流表逐条 `PC + 机器码 + main.c:464,469`）。
 
-## 9. 未完成 / 待办
+## 9. AHB/HCLK 太低 USB 不工作：真因是 TRDT 用错了频率（已修）
+
+"AHB 太低 USB 不工作"这个说法是真的，但**在我们这份固件上主因是 bug，不是硬墙**。
+
+**机制**：USB OTG 的 `GUSBCFG.TRDT`（turnaround time）必须按 **AHB/HCLK** 查表配置——
+HCLK 越低，DWC2 对 IN 令牌的应答必须越慢，否则主机等不到响应。
+ST 的权威表在 `stm32h7xx_ll_usb.c` 的 `USB_SetTurnaroundTime()`（RM0433 Table 519「TRDT values」同源）：
+
+| HCLK | TRDT |
+|---|---|
+| 14.2–15 MHz | 0x0F |
+| 15–16 MHz | 0x0E |
+| 16–17.2 MHz | 0x0D |
+| 17.2–18.5 MHz | 0x0C |
+| 18.5–20 MHz | 0x0B |
+| 20–21.8 MHz | 0x0A |
+| 21.8–24 MHz | 0x09 |
+| 24–27.7 MHz | 0x08 |
+| 27.7–32 MHz | 0x07 |
+| **≥ 32 MHz** | 0x06 |
+
+**表里最低档就是 14.2 MHz** —— 所以 USB FS 的 AHB 下限是 14.2 MHz。
+
+**我们的 bug**：`cherryusb/port/dwc2/usb_dc_dwc2.c` 的调用点是
+
+```c
+dwc2_set_turnaroundtime(busid, usbd_dwc2_get_system_clock(), dwc2_get_devspeed(busid));
+```
+
+`usbd_dwc2_get_system_clock()` 返回的是 **`SystemCoreClock`（CPU 频率）**，不是 HCLK。
+HPRE=1 时两者相等才碰巧对；一旦 AHB 分频，TRDT 就偏小（应答过快）。
+另外 `< 14.2MHz` 原来会掉进 `else` 拿到最快的 0x6，也是错的。
+
+**修法**（本次已改）：
+- 调用点改用 `HAL_RCC_GetHCLKFreq()`（`-DTRDT_FROM_CORE=1` 可退回旧行为做 A/B）；
+- `< 14.2MHz` clamp 到最慢的 0xF，不再落 0x6。
+
+**实测（不需要 ETM：只烧、只发 hello world）** —— 固定 CPU=120MHz，只改 AHB 分频：
+
+| HCLK | 旧：TRDT 按 CPU 算 | CDC | 修好：TRDT 按 HCLK 算 | CDC |
+|---:|---|---|---|---|
+| 120 MHz | 0x6 | ✅ 回显正常 | 0x6 | ✅ |
+| 60 MHz | 0x6 | ✅ | 0x6 | ✅ |
+| 30 MHz | 0x6 | ✅ | **0x7** | ✅ |
+| **15 MHz** | 0x6 | ❌ **枚举失败** | **0xE** | ✅ **回显正常** |
+| 7.5 MHz | 0x6 | ❌ | 0xF（clamp） | ❌（低于 14.2MHz 硬下限） |
+
+⇒ **HCLK ≥ 14.2MHz 完全可用**（把 TRDT 配对即可）；**HCLK < 14.2MHz 是真上不去**，
+这与 ST 表里没有更慢档一致。复现脚本 `tmp/hclk-usb-scan.py`，原始结果 `captures/hclk-usb-scan.json`。
+
+顺带说明：这条也解释了为什么 CPU=TRACECLK=30MHz 那些跑的 USB 是"能通但毛躁"——
+HCLK=30MHz 该用 0x7，旧代码给的是 0x6。修好后同频档的 USB 也规整了。
+
+## 10. 未完成 / 待办
 
 - **触发对齐偏晚**：`full30` 的 t=0 已落在 `main` 主循环里，`cdc_acm_init` 那段没进窗
   （初始化本身在记录里，但不在导出的解码窗内）。下次改成"先在 `trace_hook_entry` 稳住、
