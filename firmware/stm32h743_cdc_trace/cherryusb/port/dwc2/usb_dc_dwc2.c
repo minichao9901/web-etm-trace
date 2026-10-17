@@ -554,7 +554,17 @@ int usb_dc_init(uint8_t busid)
         USB_ASSERT_MSG(g_dwc2_udc[busid].hw_params.hs_phy_type != 0, "This dwc2 version does not support hs, so stop working");
         USB_OTG_DEV->DCFG |= USB_OTG_SPEED_HIGH;
     } else {
-        if (g_dwc2_udc[busid].hw_params.hs_phy_type == 0) {
+        /* 选了 FS 时，DCFG.DSPD 必须区分走的是哪条 FS 通路：
+         *   fs_phy_type != 0 → 核内有**专用 FS 串行收发器** → DSPD=0b11（48MHz）
+         *   fs_phy_type == 0 → 借用 HS PHY 跑 FS      → DSPD=0b01（30/60MHz）
+         * 原来的判据只看 hs_phy_type，对 STM32H743 的 USB2_OTG_FS 是错的：
+         *   实机 GHWCFG2 = 0x229FE190 → hs_phy_type=ULPI(2) 且 fs_phy_type=DEDICATED(1)，
+         *   旧代码因此挑 0b01，把专用 FS PHY 当 HS PHY 驱动 → 主机报
+         *   "设备描述符请求失败"。
+         * H7B0 的 USB1_OTG_HS 若报 fs_phy_type != 0 则两支同值，行为不变；
+         * 只有 fs_phy_type==0 且 hs_phy_type!=0 才保留旧的 HIGH_IN_FULL。 */
+        if (g_dwc2_udc[busid].hw_params.fs_phy_type != 0 ||
+            g_dwc2_udc[busid].hw_params.hs_phy_type == 0) {
             USB_OTG_DEV->DCFG |= USB_OTG_SPEED_FULL;
         } else {
             USB_OTG_DEV->DCFG |= USB_OTG_SPEED_HIGH_IN_FULL;

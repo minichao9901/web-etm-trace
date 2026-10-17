@@ -71,7 +71,9 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
         io.Mode = GPIO_MODE_AF_PP;
         io.Pull = GPIO_NOPULL;
         io.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-#ifdef GPIO_AF10_OTG_FS
+#ifdef GPIO_AF10_OTG2_FS
+        io.Alternate = GPIO_AF10_OTG2_FS;
+#elif defined(GPIO_AF10_OTG_FS)
         io.Alternate = GPIO_AF10_OTG_FS;
 #else
         io.Alternate = GPIO_AF10_OTG1_FS;
@@ -79,7 +81,13 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
         HAL_GPIO_Init(GPIOA, &io);
 
         __HAL_RCC_USB_OTG_FS_CLK_ENABLE();
+        /* 复位：清掉上一次运行/软复位遗留的 DWC2 状态（CherryUSB 自己管协议，不走 HAL_PCD_Init，
+         * 所以这一步不会有人替我们做）。 */
+        __HAL_RCC_USB_OTG_FS_FORCE_RESET();
+        __HAL_RCC_USB_OTG_FS_RELEASE_RESET();
+
         HAL_NVIC_SetPriority(OTG_FS_IRQn, 3, 0);
+        HAL_NVIC_ClearPendingIRQ(OTG_FS_IRQn);
         HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
     } else if (hpcd->Instance == USB_OTG_HS) {
         /* PB14/PB15（或 PA11/PA12 备用）走 HS 口 —— 本工程默认不用，
@@ -93,7 +101,11 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
         HAL_GPIO_Init(GPIOB, &io);
 
         __HAL_RCC_USB1_OTG_HS_CLK_ENABLE();
+        __HAL_RCC_USB1_OTG_HS_FORCE_RESET();
+        __HAL_RCC_USB1_OTG_HS_RELEASE_RESET();
+
         HAL_NVIC_SetPriority(OTG_HS_IRQn, 3, 0);
+        HAL_NVIC_ClearPendingIRQ(OTG_HS_IRQn);
         HAL_NVIC_EnableIRQ(OTG_HS_IRQn);
     }
 }
@@ -103,10 +115,12 @@ void HAL_PCD_MspDeInit(PCD_HandleTypeDef *hpcd)
     if (hpcd->Instance == USB_OTG_FS) {
         __HAL_RCC_USB_OTG_FS_CLK_DISABLE();
         HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
+        HAL_NVIC_ClearPendingIRQ(OTG_FS_IRQn);
         HAL_GPIO_DeInit(GPIOA, GPIO_PIN_11 | GPIO_PIN_12);
     } else if (hpcd->Instance == USB_OTG_HS) {
         __HAL_RCC_USB1_OTG_HS_CLK_DISABLE();
         HAL_NVIC_DisableIRQ(OTG_HS_IRQn);
+        HAL_NVIC_ClearPendingIRQ(OTG_HS_IRQn);
         HAL_GPIO_DeInit(GPIOB, GPIO_PIN_14 | GPIO_PIN_15);
     }
 }

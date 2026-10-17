@@ -117,4 +117,6 @@ SECTIONS
   /DISCARD/ : { *(.ARM.attributes) }
 }
 
-PROVIDE(_init = 0);
+/* src/runtime.c 提供真实的 _init 函数；禁止以地址 0 代替函数。
+ * （H743 原来这里是 PROVIDE(_init = 0)，被 __libc_init_array 真实调用后
+ *   跳到 0x00000001 → UNDEFINSTR HardFault，见 src/runtime.c 的说明。） */

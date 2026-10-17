@@ -31,6 +31,31 @@
 
 #include <string.h>
 
+/* PLL1 参数（build.ps1 通过 -D 传入；缺省是 480MHz 档）。
+ *   VCO = HSE/M × N；SYSCLK = VCO/P；CPU = SYSCLK/D1CPRE；TRACECLK = VCO/R/2
+ * 注意：物理 TRACECLK 是 pll1_r_ck 再二分频，所以 R=16 时 VCO 960MHz 得到 30MHz。 */
+#ifndef H7_CDC_PLL_M
+#define H7_CDC_PLL_M 5
+#endif
+#ifndef H7_CDC_PLL_N
+#define H7_CDC_PLL_N 192
+#endif
+#ifndef H7_CDC_PLL_P
+#define H7_CDC_PLL_P 2
+#endif
+#ifndef H7_CDC_PLL_R
+#define H7_CDC_PLL_R 2
+#endif
+#ifndef H7_CDC_D1CPRE
+#define H7_CDC_D1CPRE RCC_SYSCLK_DIV1
+#endif
+#ifndef H7_CDC_HPRE
+#define H7_CDC_HPRE RCC_HCLK_DIV2
+#endif
+#ifndef H7_CDC_FLASH_LATENCY
+#define H7_CDC_FLASH_LATENCY FLASH_LATENCY_4
+#endif
+
 uint32_t g_sysclk_hz = 0;
 uint32_t g_clock_err = 0;
 
@@ -307,21 +332,20 @@ static void system_clock_init(void)
     while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
     }
 
-    /* ② Flash 等待周期：AXI 240MHz 下 4WS */
-    __HAL_FLASH_SET_LATENCY(FLASH_LATENCY_4);
+    /* ② Flash 等待周期 */
+    __HAL_FLASH_SET_LATENCY(H7_CDC_FLASH_LATENCY);
 
     /* ③ PLL1: 25/5*192 = 960MHz VCO -> SYSCLK 480MHz
      *   （H7 的 PLLN 字段是"值-1"，HAL 里写 192 会编码成 191） */
-    osc.OscillatorType = RCC_OSCILLATORTYPE_HSE | RCC_OSCILLATORTYPE_HSI48;
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
     osc.HSEState = RCC_HSE_ON;
-    osc.HSI48State = RCC_HSI48_ON;
     osc.PLL.PLLState = RCC_PLL_ON;
     osc.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-    osc.PLL.PLLM = 5;
-    osc.PLL.PLLN = 192;
-    osc.PLL.PLLP = 2;
+    osc.PLL.PLLM = H7_CDC_PLL_M;
+    osc.PLL.PLLN = H7_CDC_PLL_N;
+    osc.PLL.PLLP = H7_CDC_PLL_P;
     osc.PLL.PLLQ = 2;
-    osc.PLL.PLLR = 2;
+    osc.PLL.PLLR = H7_CDC_PLL_R;
     osc.PLL.PLLRGE = RCC_PLL1VCIRANGE_2; /* 4~8MHz 参考 */
     osc.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
     osc.PLL.PLLFRACN = 0;
@@ -333,22 +357,53 @@ static void system_clock_init(void)
     clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
                     RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
     clk.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-    clk.SYSCLKDivider = RCC_SYSCLK_DIV1;
-    clk.AHBCLKDivider = RCC_HCLK_DIV2;
+    clk.SYSCLKDivider = H7_CDC_D1CPRE;
+    clk.AHBCLKDivider = H7_CDC_HPRE;
     clk.APB3CLKDivider = RCC_APB3_DIV2;
     clk.APB1CLKDivider = RCC_APB1_DIV2;
     clk.APB2CLKDivider = RCC_APB2_DIV2;
     clk.APB4CLKDivider = RCC_APB4_DIV4;
-    if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_4) != HAL_OK) {
+    if (HAL_RCC_ClockConfig(&clk, H7_CDC_FLASH_LATENCY) != HAL_OK) {
         g_clock_err |= 2u;
     }
 
-    /* ⑤ USB 时钟 = HSI48 */
+    /* ⑤ USB 内核时钟 = PLL3Q 48MHz（由 HSE 25MHz 派生）
+     *   依据两处参考实现（都用 PLL3Q，不用 HSI48）：
+     *     · STM32Cube_FW_H7_V1.11.2  Projects/STM32H743I-EVAL/Applications/
+     *       USB_Device/CDC_Standalone（USB2_OTG_FS + PA11/PA12）
+     *     · 本站已验证的 firmware/stm32h7b0_cdc_trace
+     *   ⚠️ 原来这里用 HSI48：实机 USBSEL 确实读回 3(=HSI48)、HSI48RDY 也置位，
+     *      但 USB2_OTG_FS 的核软复位（GRSTCTL.CSRST）**永不完成**，于是
+     *      dwc2_set_mode 死等 GINTSTS.CMOD（GINTSTS 对强制 HOST/DEVICE 完全无响应）。
+     *      换成 PLL3Q 后核复位与枚举才正常。
+     *   PLL3: 25/25 = 1MHz 参考 ×336 = 336MHz VCO，Q=7 → 48MHz。 */
     periph.PeriphClockSelection = RCC_PERIPHCLK_USB;
-    periph.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
+    periph.UsbClockSelection = RCC_USBCLKSOURCE_PLL3;
+    periph.PLL3.PLL3M = 25;
+    periph.PLL3.PLL3N = 336;
+    periph.PLL3.PLL3P = 2;
+    periph.PLL3.PLL3Q = 7;
+    periph.PLL3.PLL3R = 2;
+    periph.PLL3.PLL3RGE = RCC_PLL3VCIRANGE_0;
+    periph.PLL3.PLL3VCOSEL = RCC_PLL3VCOMEDIUM;
+    periph.PLL3.PLL3FRACN = 0;
     if (HAL_RCCEx_PeriphCLKConfig(&periph) != HAL_OK) {
         g_clock_err |= 4u;
     }
+
+    /* ⑥ USB 供电 —— H7 必须显式处理，漏了就是"能枚举但设备描述符请求失败"。
+     *   （H7B0 工程有这一段，H743 移植时整段漏掉了。）
+     *   PWR_CR3.USB33DEN   : VDD33USB 电压检测器，外部供 3.3V 也必须开。
+     *   PWR_CR3.USBREGEN   : 片内 USB 稳压器，只在板子不给 VDD33USB 时才开。
+     */
+    HAL_PWREx_EnableUSBVoltageDetector();
+#if H7_CDC_USB_INTERNAL_REGULATOR
+    if (HAL_PWREx_EnableUSBReg() != HAL_OK) {
+        g_clock_err |= 8u;
+    }
+#else
+    CLEAR_BIT(PWR->CR3, PWR_CR3_USBREGEN);
+#endif
 
     g_sysclk_hz = HAL_RCC_GetSysClockFreq();
 }

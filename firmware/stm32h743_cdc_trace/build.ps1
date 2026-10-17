@@ -8,12 +8,18 @@
 # 产物：build\fw.elf / fw.bin / fw.hex，并在根目录放一份副本。
 # 只编译，不烧录；固件**不配置 ETM**，trace 由外部 SWD 工具配置。
 param(
-    [ValidateSet('480')][string]$CoreMHz = '480',
-    [ValidateSet(0, 4, 5, 6, 8, 16)][int]$TraceR = 0,
+    [ValidateSet('480', '100', '90', '80', '70', '60', '50', '45', '40', '35', '30', '25')][string]$CoreMHz = '480',
+    [ValidateSet(0, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 128)][int]$TraceR = 0,
+    [ValidateSet('External', 'Internal')][string]$UsbSupply = 'External',
     [string]$Gcc
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot '..\tools\BuildTools.psm1') -Force
+
+# USB 供电接法（对齐 H7B0 工程）：
+#   External = VDD33USB 由板上 3.3V 供给 → 只开电压检测器 USB33DEN，内部稳压器关。
+#   Internal = 用片内 USB 稳压器 → HAL_PWREx_EnableUSBReg()。
+$h7UsbReg = [int]($UsbSupply -eq 'Internal')
 
 $h7Root = $PSScriptRoot
 if (-not $Gcc) { $Gcc = (Get-Command arm-none-eabi-gcc).Source }
@@ -22,10 +28,28 @@ $h7Sdk = Join-Path $h7Root 'sdk'
 $h7Build = Join-Path $h7Root 'build'
 New-Item -ItemType Directory -Path $h7Build -Force | Out-Null
 
-# VCO = 960MHz（25MHz/5*192）；P=2 -> SYSCLK 480MHz；R 决定 TRACEPORTCK
-$h7P = 2
-$h7R = 2
-if ($TraceR -ne 0) { $h7R = $TraceR }
+# ---------------------------------------------------------------- 时钟档位
+# 参考频率 25MHz / M=5 = 5MHz。
+#   480 档：VCO=960MHz，P=2 → SYSCLK 480MHz；TRACECLK = VCO/R/2（R 由 -TraceR 选）。
+#   同频档（-CoreMHz 35..90）：VCO = 8f，P=8，R=4，D1CPRE=/1 → CPU = TRACECLK = f。
+$h7M = 5
+if ($CoreMHz -eq '480') {
+    $h7N = 192; $h7P = 2
+    $h7R = if ($TraceR -ne 0) { $TraceR } else { 2 }
+    $h7D1CPRE = 'RCC_SYSCLK_DIV1'; $h7HPRE = 'RCC_HCLK_DIV2'; $h7Lat = 'FLASH_LATENCY_4'
+} else {
+    $f = [int]$CoreMHz
+    $vco = 8 * $f
+    $h7N = $vco / 5
+    $h7P = 8
+    # 不给 -TraceR 就是同频档（CPU == TRACECLK）；给了就用它当 R，得到 trace = 4f/R
+    $h7R = if ($TraceR -ne 0) { $TraceR } else { 4 }
+    $h7D1CPRE = 'RCC_SYSCLK_DIV1'; $h7HPRE = 'RCC_HCLK_DIV1'; $h7Lat = 'FLASH_LATENCY_2'
+    if ($h7N -ne [math]::Floor($h7N)) { throw "同频档 $CoreMHz MHz 的 N=$h7N 不是整数" }
+    if ($vco -lt 192 -or $vco -gt 960) { throw "同频档 $CoreMHz MHz 的 VCO=$vco MHz 超出 192..960" }
+}
+# 物理 TRACECLK = VCO / R / 2
+$h7TraceMHz = (25000000 / $h7M) * $h7N / $h7R / 2 / 1000000
 
 $h7Flags = @(
     '-mcpu=cortex-m7', '-mthumb', '-mfpu=fpv5-d16', '-mfloat-abi=hard',
@@ -35,7 +59,9 @@ $h7Flags = @(
     '-ffunction-sections', '-fdata-sections', '-fno-common',
     '-Wall', '-Wextra', '-Wno-unused-parameter', '-Wno-unused-function',
     '-DUSE_HAL_DRIVER', '-DSTM32H743xx', '-DHSE_VALUE=25000000',
-    "-DH7_CDC_PLL_P=$h7P", "-DH7_CDC_PLL_R=$h7R",
+    "-DH7_CDC_PLL_M=$h7M", "-DH7_CDC_PLL_N=$h7N", "-DH7_CDC_PLL_P=$h7P", "-DH7_CDC_PLL_R=$h7R",
+    "-DH7_CDC_D1CPRE=$h7D1CPRE", "-DH7_CDC_HPRE=$h7HPRE", "-DH7_CDC_FLASH_LATENCY=$h7Lat",
+    "-DH7_CDC_USB_INTERNAL_REGULATOR=$h7UsbReg",
     # SEGGER RTT 控制块固定到 .rtt_cb（链接脚本把它放在 DTCM 0x20002000）
     '-DRTT_CB_ATTR=__attribute__((section(".rtt_cb"),aligned(4)))',
     "-I$h7Root\src",
@@ -55,6 +81,7 @@ $h7Flags = @(
 # ---------------- 源文件清单 ----------------
 $h7Sources = @(
     "$h7Root\src\main.c",
+    "$h7Root\src\runtime.c",
     "$h7Root\src\trace_hooks.c",
     "$h7Root\src\boot_probe.c",
     "$h7Root\src\usb_dc_low_level.c",
@@ -113,6 +140,6 @@ foreach ($h7Ext in @('elf', 'bin', 'hex')) {
     Copy-Item -LiteralPath "$h7Build\fw.$h7Ext" -Destination "$h7Root\fw.$h7Ext" -Force
 }
 
-Write-Output "构建完成：STM32H743 CPU ${CoreMHz}MHz / TRACEPORTCK $(960 / $h7R)MHz -> $h7Elf"
+Write-Output "构建完成：STM32H743 CPU ${CoreMHz}MHz / 物理 TRACECLK $h7TraceMHz MHz (M=$h7M N=$h7N P=$h7P R=$h7R) -> $h7Elf"
 Write-Output "固件不开启 ETM；trace 由外部 SWD 工具配置。关键符号："
 Select-String -Path "$h7Build\fw.symbols.txt" -Pattern ' g_trace$| _SEGGER_RTT$| g_boot_stage$| OTG_FS_IRQHandler' | ForEach-Object { $_.Line }

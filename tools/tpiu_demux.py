@@ -17,7 +17,8 @@ def demux(raw):
     current = None
     streams = {}
     stats = dict(frames=0, fsyncs=0, hsyncs=0, errors=0, unknown_bytes=0,
-                 initial_skipped_bytes=skipped, id_changes=[], trailing_sync_bytes=0)
+                 initial_skipped_bytes=skipped, id_changes=[], trailing_sync_bytes=0,
+                 idle_resyncs=0, dropped_partial_frame_bytes=0)
 
     def emit(source, value):
         if source is None:
@@ -45,9 +46,17 @@ def demux(raw):
             position += 2
             continue
         if pair == b'\xff\xff':
+            # 半帧处出现 FF FF：格式化器在数据突发结束后转入 idle 了（CPU==TRACECLK
+            # 这类稀疏 trace 里是常态）。格式化器保证数据字节是偶数（LSB 用于区分
+            # 控制字节），所以帧内 FF FF 不可能是数据 —— 丢掉这个半帧、跳到下一个
+            # FSYNC 重新对齐，而不是把整条流判为无效。
             stats['errors'] += 1
-            # A broken frame is not silently concatenated into a trusted stream.
-            raise ValueError(f'帧中出现非法 FSYNC/ID，字节偏移 {position}，已完成 {stats["frames"]} 帧。')
+            stats['idle_resyncs'] += 1
+            stats['dropped_partial_frame_bytes'] += len(frame)
+            frame.clear()
+            nxt = raw.find(FSYNC, position)
+            position = len(raw) if nxt < 0 else nxt
+            continue
         frame.extend(pair)
         position += 2
         if len(frame) != 16:
