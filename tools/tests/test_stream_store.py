@@ -12,6 +12,14 @@ from decode_stream import export_simplified_stream
 
 
 class StreamStoreTests(unittest.TestCase):
+    def test_native_path_follows_portable_runtime_selection_after_import(self):
+        from unittest.mock import patch
+        import decode_trace
+        from decode_stream import _native
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);native=root/'build-native/etm_decode.exe'
+            native.parent.mkdir();native.write_bytes(b'not executed')
+            with patch.object(decode_trace,'ROOT',root):self.assertEqual(_native(),native)
     def test_replay_index_navigation_and_unknown_export(self):
         with tempfile.TemporaryDirectory() as directory:
             folder=Path(directory)

@@ -13,7 +13,8 @@ from pathlib import Path
 
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_MCLASS
 
-from decode_trace import DEFAULT_CONFIG, REG_ORDER, V3_REG_ORDER, ROOT, Image, decoder_config
+import decode_trace as decoder_runtime
+from decode_trace import DEFAULT_CONFIG, REG_ORDER, V3_REG_ORDER, Image, decoder_config
 
 from flow_analysis import possible_predicates, mark_execution, analyze_calls, byte_accounting
 from stream_store import JsonLines
@@ -23,7 +24,9 @@ CACHE_MAX = 8192
 
 
 def _native():
-    native = ROOT / 'build-native/etm_decode.exe'
+    # The portable launcher selects the bundled snapshot AFTER module imports.
+    # Do not capture a stale copy of decode_trace.ROOT at import time.
+    native = decoder_runtime.ROOT / 'build-native/etm_decode.exe'
     if not native.exists():
         raise ValueError('缺少 OpenCSD 解码器，请先运行 build-decoder.ps1。')
     return native
