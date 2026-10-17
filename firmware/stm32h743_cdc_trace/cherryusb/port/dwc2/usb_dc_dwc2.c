@@ -8,7 +8,7 @@
 #include "usb_dwc2_param.h"
 /* TRDT（USB 转向时间）必须按 AHB/HCLK 查表，需要 HAL 的 HCLK 查询。
  * 见 dwc2_set_turnaroundtime() 的调用点。 */
-#include "stm32h7xx_hal.h"
+extern uint32_t HAL_RCC_GetHCLKFreq(void);
 
 #define USBD_BASE (g_usbdev_bus[busid].reg_base)
 
@@ -119,7 +119,7 @@ static inline int dwc2_core_init(uint8_t busid)
     return ret;
 }
 
-static inline void dwc2_set_mode(uint8_t busid, uint8_t mode)
+static inline int dwc2_set_mode(uint8_t busid, uint8_t mode)
 {
     USB_OTG_GLB->GUSBCFG &= ~(USB_OTG_GUSBCFG_FHMOD | USB_OTG_GUSBCFG_FDMOD);
 
@@ -129,12 +129,14 @@ static inline void dwc2_set_mode(uint8_t busid, uint8_t mode)
         USB_OTG_GLB->GUSBCFG |= USB_OTG_GUSBCFG_FDMOD;
     }
 
-    while (1) {
-        if ((USB_OTG_GLB->GINTSTS & 0x1U) == USB_OTG_MODE_DEVICE) {
-            break;
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        if ((USB_OTG_GLB->GINTSTS & 0x1U) == mode) {
+            return 0;
         }
         usbd_dwc2_delay_ms(10);
     }
+    USB_LOG_ERR("DWC2 mode switch timeout\r\n");
+    return -1;
 }
 
 static inline int dwc2_flush_rxfifo(uint8_t busid)
@@ -524,7 +526,9 @@ int usb_dc_init(uint8_t busid)
     ret = dwc2_core_init(busid);
 
     /* Force Device Mode*/
-    dwc2_set_mode(busid, USB_OTG_MODE_DEVICE);
+    if (dwc2_set_mode(busid, USB_OTG_MODE_DEVICE) < 0) {
+        return -1;
+    }
 
     USB_ASSERT_MSG((USB_OTG_GLB->GRXFSIZ & 0xffff) >= g_dwc2_udc[busid].user_params.device_rx_fifo_size,
                    "device_rx_fifo_size cannot be larger than power_on_value %u", (unsigned int)(USB_OTG_GLB->GRXFSIZ & 0xffff));

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from trace_port import extract
+from trace_port import extract, filter_pulses
 
 
 def waveform(path, payload, initial_clock, prefix=None, delays=(7,)):
@@ -120,6 +120,40 @@ class TracePortTests(unittest.TestCase):
             self.assertEqual(candidates[0],payload)
             self.assertAlmostEqual(report['clock_runs'][0]['clock_hz_average'],4e6,places=2)
             self.assertAlmostEqual(report['clock_runs'][-1]['clock_hz_average'],16e6,places=2)
+
+
+class PulseFilterTests(unittest.TestCase):
+    def test_injected_clock_glitch_is_removed_and_original_bytes_are_restored(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p=Path(folder)/'wave.csv';payload=bytes.fromhex('ff ff ff 7f 05 ab 10 22 24 44')
+            waveform(p,payload,0)
+            _,expected=extract(p,0,[1,2,3,4])
+            with p.open(encoding='utf-8-sig',newline='') as stream:rows=list(csv.reader(stream))
+            first=next(row for row in rows[1:] if abs(float(row[0])-7e-9)<1e-15)
+            glitch=list(first);glitch[0]='5e-8';glitch[1]=str(1-int(first[1]))
+            recovered=list(first);recovered[0]='5.2e-8'
+            data=sorted(rows[1:]+[glitch,recovered],key=lambda r:float(r[0]))
+            with p.open('w',encoding='utf-8-sig',newline='') as stream:csv.writer(stream).writerows([rows[0]]+data)
+            _,broken=extract(p,0,[1,2,3,4])
+            report,fixed=extract(p,0,[1,2,3,4],glitch_ns=4)
+            self.assertNotEqual(broken,expected)
+            self.assertEqual(fixed,expected)
+            self.assertEqual(report['software_filter']['removed_transitions']['0'],2)
+    def test_removes_complete_short_pairs_without_moving_surviving_edges(self):
+        edges=[(10e-9,1),(12e-9,0),(20e-9,1),(36e-9,0),(38e-9,1),(52e-9,0)]
+        self.assertEqual(filter_pulses(edges,4),[(20e-9,1),(52e-9,0)])
+        self.assertEqual(filter_pulses(edges,0),edges)
+    def test_filter_is_opt_in_keeps_original_file_and_rejects_destructive_limit(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as folder:
+            p=Path(folder)/'wave.csv';waveform(p,bytes.fromhex('ff ff ff 7f 05 20'),0)
+            before=p.read_bytes();raw,_=extract(p,0,[1,2,3,4],.25)
+            filtered,_=extract(p,0,[1,2,3,4],.25,4)
+            self.assertEqual(p.read_bytes(),before)
+            self.assertFalse(raw['software_filter']['enabled'])
+            self.assertTrue(filtered['software_filter']['enabled'])
+            self.assertEqual(filtered['input_sha256'],hashlib.sha256(before).hexdigest())
+            with self.assertRaises(ValueError):extract(p,0,[1,2,3,4],.25,100)
 
 
 if __name__ == '__main__':

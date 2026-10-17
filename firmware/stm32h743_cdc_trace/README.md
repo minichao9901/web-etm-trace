@@ -1,93 +1,41 @@
-# STM32H743 + CherryUSB CDC ACM + etm-trace 钩子
+# STM32H743 阿波罗板 CDC + 网页 ETMv4
 
-目标板：**正点原子阿波罗 STM32H743**（HSE 25MHz）。
-与 `stm32h7b0_cdc_trace` 是**同一套源码结构**，差别只有：芯片宏、启动文件、链接脚本容量、
-时钟（480MHz）、USB 实例（用 `USB_OTG_FS` 而不是 H7B0 那个唯一的 `USB1_OTG_HS`）。
+板级输入：HSE 25 MHz，USB_SLAVE 接 PA11/PA12，外部供给 VDD33USB。CH0=PE2/TRACECLK，CH1～4=PE3～PE6/TRACED0～3，CH5 不使用，LA 必须共地。
 
-## 1. 构建
+## 构建与烧录
 
 ```powershell
-pwsh -NoProfile -File .\build.ps1              # CPU 480MHz
-pwsh -NoProfile -File .\build.ps1 -TraceR 4    # TRACEPORTCK 240MHz
+# 在本目录，工具链须提供 arm-none-eabi-gcc，或显式传 -Gcc
+pwsh -File ./build.ps1 -CoreMHz 60 -TraceR 8
+# 从工程根目录烧录明确镜像
+pwsh -File ./tools/h743/h743-flash.ps1 -Elf ./firmware/stm32h743_cdc_trace/build/fw.elf
 ```
 
-产物 `build/fw.{elf,bin,hex}` + 根目录副本；`.bin` 烧到 `0x08000000`。
-实测占用：`text 31168 + data 144 ≈ 31.3KB`（2MB Flash 随便放）。
+此档 CPU/HCLK=60 MHz，PLL1 VCO=480 MHz，PLL1R=60 MHz，物理 TRACECLK=30 MHz。USB 独立使用 PLL3Q=48 MHz。`-CoreMHz 480 -TraceR 16` 得 CPU480/HCLK240/TRACECLK30，需相应芯片修订版本支持。
 
-## 2. 时钟（480MHz，阿波罗板标准做法）
+产物 `build/fw.{elf,bin,hex}`，默认复制到根目录；`-OutputDir <目录> -NoPublish` 可独立验证其他档位而不覆盖已发布镜像。`-AhbDiv 0` 使用该档默认分频，1/2/4/8/16 为显式覆盖。`-UsbSupply External` 为本板默认；其他板按供电原理图选择，不能盲目打开内部 USB 稳压器。
 
-```
-HSE 25MHz
-└ PLL1: M=5, N=192, P=2, Q=2, R=2
-    VCO = 25/5 × 192 = 960 MHz
-    SYSCLK = 960/P = **480 MHz**
-    AXI/HCLK = /2 = 240 MHz；APB1/2/3 = /2 = 120 MHz；APB4 = /4 = 60 MHz
-USB : HSI48 直供 48 MHz
-```
+## 网页操作
 
-⚠️ 跑 480MHz 有两条硬要求（官方 RTT 测速固件里记过，本工程已照做）：
+1. 启动工具箱 ETM 本地桥，打开“更多功能 → ETM 执行轨迹”。
+2. 浏览载入**与烧录镜像一致**的 ELF；需要时选择源码目录。不要把旧版本 ELF 绑定到新固件。
+3. 连接探针，搜索并添加 `trace_hook_entry`，选为采集起点。它在时钟初始化之后、CDC 初始化之前。
+4. 时钟页填 HSE=25 MHz，核对 CPU60/HCLK60/TRACECLK30；网页只计算和核对，不改 PLL。
+5. 500 MSa/s、门限1.65 V、CH0～4、短窗2～10 ms。先关闭分支广播、返回栈和周期计数；这些选项可通过网页配置并回读。
+6. 若原始采样有窄脉冲，可在“通道、相位与滤波”选择**解码前软件滤波4 ns**做明确对照；默认0关闭。它不会改写原始CSV/KVDAT，也不代表模拟信号质量已改善。KingstVIS 的滤波配置快照不能保证 Socket 导出的CSV已经滤波。
+7. 联动采集会先校验 Flash、复位运行到断点、暂停本页断点，配置 Trace、武装 LA，再继续 CPU；结束后恢复本页断点。可直接再次采集；是否先复位由调试页选项控制。
+8. 查看执行流、源码、调用统计、热点和火焰图；横轴为执行序号，不是函数耗时。保存 `.etmrecord` 可在另一台电脑重解码。
 
-1. **VOS0 电压档**，且写 `VOS` 之前必须先清 `PWR_CR3.SCUEN` ——
-   不清的话 `VOS` 写入被硬件静默忽略，表现是永远等不到 `VOSRDY`。
-2. 升频前先把 **Flash 等待周期**加上（这里 4WS）。
+长记录采用 JSONL 和 SQLite 分页；原始 CSV 取样仍需要与采集大小相关的内存。旧版巨型 decoded.json 要重新解码。不可把字节对账、指令数或源码映射率当作采集无损证明。
 
-## 3. USB 接线（阿波罗板特有，最容易踩）
+## 职责与诊断
 
-- 用 **USB_OTG_FS @0x40080000，PA11/PA12，内嵌全速 PHY**。
-- ⚠️ **板上 USB HOST 与 USB SLAVE 共用 PA11/PA12**，靠**跳线帽**选择：
-  要当设备用，跳线帽必须把 PA11/PA12 接到 **USB_SLAVE** 座子，并且线插在 SLAVE 口。
-- ⚠️ **板上没有 ULPI PHY**，所以走不了 USB 高速；HS 口（PB14/PB15）在这块板上用不上。
-  代码里 `HAL_PCD_MspInit` 保留了 HS 分支，将来换带 ULPI 的板子不用重写。
+固件负责 HSE、供电/VOS、Flash 等待周期、PLL1/PLL3、总线、SysTick 和 USB 外设。网页负责 PE2～PE6 的 Trace 复用、调试时钟门控、ETM/Funnel/ETF/TPIU、断点及采集；不会自动替固件修复 USB 时钟。
 
-## 4. 与 H7B0 工程的差异（对照表）
+`g_trace` 位于0x20003000，魔数0x34524354；`ready=1` 仅表示 USB 初始化函数成功返回，不代表 Windows 已枚举。`g_boot_stage` 地址以本次 ELF 符号表为准。Windows 目标串口 VID/PID=F055:7431；0D28:0204 的COM34是探针，不是目标。
 
-| 项 | H743（本工程） | H7B0 |
-|---|---|---|
-| 芯片宏 / 启动文件 | `STM32H743xx` / `startup_stm32h743xx.s` | `STM32H7B0xx` / `startup_stm32h7b0xx.s` |
-| 链接脚本 | `ld/stm32h743.ld`（2MB Flash / 512KB AXI） | `ld/stm32h7b0.ld`（128KB / 1MB AXI） |
-| SYSCLK | 480MHz（PLL1 N=192, VCO 960） | 280MHz（PLL1 N=112, VCO 560） |
-| USB 实例 | `USB_OTG_FS`（0x40080000，`OTG_FS_IRQn`） | `USB1_OTG_HS`（0x40040000，`OTG_HS_IRQn`） |
-| USB 低级初始化 | 按 `reg_base` 同时兼容 FS/HS 两个实例 | 只处理 HS |
+必须保留真实 `_init/_fini`，禁止再用 `PROVIDE(_init=0)`。DWC2 选速须正确处理专用 FS PHY；TRDT 按 HCLK计算。初始化失败保持 ready=0 并报告，不无限等待模式切换。软件复位不会完整重置 CoreSight，每次采集仍需重新配置。
 
-其余（CherryUSB 移植层、`.noncacheable` 缓冲、`.rtt_cb@0x20002000`、`.trace_diag@0x20003000`、
-`boot_probe`、`trace_hooks`、CDC 命令行）**完全一致**，可以互相对照抄。
+本例默认对普通文本原样回显；`hello world!\n` 应收到相同13字节，不附加错误行。测试“初始化→枚举→回显”的完整过程需要足够长的**同一次**采集；分时窗导出不能冒充全程无缺口记录。
 
-## 5. 运行验证（无需 USB 主机，也不需要插着 USB 线）
-
-| 地址 | 内容 | 期望 |
-|---|---|---|
-| `0x20003000` | `g_trace`（40 字节） | `34524354`（`'TRC4'`）、`sysclk=480000000`、`ready=1` |
-| `0x20002000` | `_SEGGER_RTT` | `"SEGGER RTT"` |
-| `0x24000014` | `g_boot_stage` | `8` = 9 步启动全部走完 |
-
-```powershell
-python ..\stm32f103ze_cdc_trace\tools\min_probe.py --target stm32h743xx --read 0x20003000:40 --read 0x20002000:12
-```
-
-## 6. etm-trace 部分
-
-**固件不配置 ETM**（同 H7B0 工程）：只给 `trace_hook_entry()` 稳定落点、
-`g_trace.ready` 就绪标志、DWT 周期打点、PA0 逻辑分析仪打点脚。
-ETMv4 / CSTF / ETF / TPIU / PE2–PE6 全部由外部 SWD 工具配置。
-
-参考现成做法：`E:\web-etm-trace\firmware\stm32h7b0_etm`（固件自己配 ETM 的低频验证版）
-与本工程所属的网页工具链（`E:\web-etm-trace\tools`、`server.py`），
-H7B0 上的接线与寄存器结论可直接迁移到 H743（同为 Cortex-M7 + ETMv4 + TPIU）。
-
-## 7. 目录
-
-```
-stm32h743_cdc_trace/
-├── build.ps1 / ld/stm32h743.ld
-├── src/{main.c, trace_hooks.c/.h, boot_probe.c, usb_dc_low_level.c}
-├── sdk/            # H7 HAL/CMSIS/RTT（H743 与 H7B0 共用同一份 STM32H7xx HAL）
-├── cherryusb/      # v1.6.1；port/dwc2 用自写的 device-only glue
-└── build/
-```
-
-## 8. 已知坑
-
-与 `stm32h7b0_cdc_trace/README.md` 第 4 节完全一致（官方 glue 会拖入 host 栈、
-`HAL_PCD_MODULE_ENABLED`、`-DRTT_CB_ATTR`、`PROVIDE(_init=0)`、D-Cache 关闭、RTT 256KB 上行缓冲）。
-额外一条：H743 头文件里 `USB_OTG_HS` 是 `USB1_OTG_HS` 的别名、`USB_OTG_FS` 是 `USB2_OTG_FS` 的别名，
-写代码时用哪个名字都行，但**中断向量要用 `OTG_FS_IRQn`/`OTG_HS_IRQn` 这对名字**。
+详细审查及本轮验收见 `../../docs/h743-web-review-2026-10-17.md`。

@@ -18,4 +18,5 @@ test('unsupported chip capabilities stay disabled and H7 capabilities come from 
   assert.deepEqual(traceCapabilities('stm32f1',{}),{branchBroadcast:false,returnStack:false,cycleCount:false});
   assert.deepEqual(traceCapabilities('stm32h7b0',{idr0:0}),{branchBroadcast:false,returnStack:false,cycleCount:false});
   assert.deepEqual(traceCapabilities('stm32h7b0',{idr0:0x80006e1}),{branchBroadcast:true,returnStack:true,cycleCount:true});
+  assert.deepEqual(traceCapabilities('stm32h743',{idr0:0x80006e1}),{branchBroadcast:true,returnStack:true,cycleCount:true});
 });

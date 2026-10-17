@@ -36,15 +36,8 @@ def demux(raw):
             break
         if position + 2 > len(raw):
             break
-        if raw[position:position + 4] == FSYNC:
-            # FSYNC 允许出现在**帧中间**：格式化器在半帧处转入 idle 时就是这样发的
-            # （CPU==TRACECLK 时端口 98% 时间空闲，必然频繁出现）。
-            # 格式化器保证数据字节恒为偶数（LSB 用于区分控制字节），所以
-            # FF FF FF 7F 不可能是数据 —— 跳过 4 字节（偶数长度，不破坏帧内配对）
-            # 继续收集本帧，既不丢数据也不打乱字节相位。
+        if not frame and raw[position:position + 4] == FSYNC:
             stats['fsyncs'] += 1
-            if frame:
-                stats['mid_frame_fsyncs'] += 1
             position += 4
             continue
         pair = raw[position:position + 2]
@@ -53,17 +46,10 @@ def demux(raw):
             position += 2
             continue
         if pair == b'\xff\xff':
-            # 半帧处出现 FF FF：格式化器在数据突发结束后转入 idle 了（CPU==TRACECLK
-            # 这类稀疏 trace 里是常态）。格式化器保证数据字节是偶数（LSB 用于区分
-            # 控制字节），所以帧内 FF FF 不可能是数据 —— 丢掉这个半帧、跳到下一个
-            # FSYNC 重新对齐，而不是把整条流判为无效。
-            stats['errors'] += 1
-            stats['idle_resyncs'] += 1
-            stats['dropped_partial_frame_bytes'] += len(frame)
-            frame.clear()
-            nxt = raw.find(FSYNC, position)
-            position = len(raw) if nxt < 0 else nxt
-            continue
+            # Arm IHI0029D D4.2.2: full sync occurs BETWEEN frames.
+            # Only halfword sync may interrupt a frame (D4.2.3).
+            # Joining a partial frame across FSYNC can fabricate trace bytes.
+            raise ValueError(f'TPIU 帧内完整同步或非法源 ID 0x7f（物理偏移 {position}，帧内 {len(frame)} 字节）；拒绝拼接损坏帧')
         frame.extend(pair)
         position += 2
         if len(frame) != 16:

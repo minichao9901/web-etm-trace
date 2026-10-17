@@ -22,10 +22,7 @@
 extern void (*g_usb_dwc2_irq[2])(uint8_t busid);
 extern uint8_t g_usb_dwc2_busid[2];
 
-/* HAL_PCD_MspInit 只读 hpcd->Instance，用一个本地壳传参即可 */
-static struct {
-    USB_OTG_GlobalTypeDef *Instance;
-} s_pcd_fake;
+static PCD_HandleTypeDef s_pcd;
 
 void usb_dc_low_level_init(uint8_t busid)
 {
@@ -39,8 +36,8 @@ void usb_dc_low_level_init(uint8_t busid)
         g_usb_dwc2_irq[0] = USBD_IRQHandler;
     }
 
-    s_pcd_fake.Instance = (USB_OTG_GlobalTypeDef *)base;
-    HAL_PCD_MspInit((PCD_HandleTypeDef *)&s_pcd_fake);
+    s_pcd.Instance = (USB_OTG_GlobalTypeDef *)base;
+    HAL_PCD_MspInit(&s_pcd);
 }
 
 void usb_dc_low_level_deinit(uint8_t busid)
@@ -55,8 +52,8 @@ void usb_dc_low_level_deinit(uint8_t busid)
         g_usb_dwc2_irq[0] = NULL;
     }
 
-    s_pcd_fake.Instance = (USB_OTG_GlobalTypeDef *)base;
-    HAL_PCD_MspDeInit((PCD_HandleTypeDef *)&s_pcd_fake);
+    s_pcd.Instance = (USB_OTG_GlobalTypeDef *)base;
+    HAL_PCD_MspDeInit(&s_pcd);
 }
 
 /* ---------------- HAL_PCD_MspInit / DeInit（ST 惯例的板级钩子） ---------------- */

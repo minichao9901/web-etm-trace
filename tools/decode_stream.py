@@ -1,13 +1,9 @@
-"""流式解码：内存 O(1)，可以解任意长度的采集（整段秒级也行）。
+"""流式展开与派生分析；事件保存在 JSONL，内存不随展开指令数线性增长。
 
-与 decode_trace.decode() 的差别：
-  · 原生解码器的输出直接落到 native.jsonl，不再被捕获进内存；
-  · packets / elements / events 一律边读边写（JSONL 临时文件），最后拼成 decoded.json；
-  · events 另存一份 events.jsonl，供 export_simplified_stream() 再流式导出简化 C；
-  · 反汇编缓存有上限，长 trace 不会把内存吃穿。
-
-产物：decoded.json / events.jsonl / sources.json / tpiu.bin / framing.json / qa.json。
-调用方要么读 events.jsonl（流式），要么只读很小的一部分（summary 在 decoded.json 尾部）。
+与常规解码一致地保留条件执行未知、调用栈及真实包字节核算。
+events/packets/elements 只存 JSONL；decoded.json 是小型元数据与分析摘要。
+注意：CSV 取样仍加载跳变轨迹，ETM 输入、ELF 和派生调用树也占内存；
+本模块不声称整个采集链路 O(1) 或支持无限长度。
 """
 import collections
 import hashlib
@@ -18,6 +14,9 @@ from pathlib import Path
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_MCLASS
 
 from decode_trace import DEFAULT_CONFIG, REG_ORDER, V3_REG_ORDER, ROOT, Image, decoder_config
+
+from flow_analysis import possible_predicates, mark_execution, analyze_calls, byte_accounting
+from stream_store import JsonLines
 
 FAULT_TERMS = ('OVERFLOW', 'BAD_SEQUENCE', 'BAD_TRACEMODE', 'RESERVED')
 CACHE_MAX = 8192
@@ -67,7 +66,7 @@ def decode_stream(id_stream, elf, workdir, config=None, sources=None, max_events
     native_jsonl = workdir / 'native.jsonl'
     with native_jsonl.open('wb') as out:
         process = subprocess.run([str(_native()), str(workdir / 'etm.bin'), str(manifest_file)],
-                                 stdout=out, stderr=subprocess.PIPE)
+                                 stdout=out, stderr=subprocess.PIPE, timeout=900)
     (workdir / 'native.log').write_bytes(process.stderr or b'')
     if process.returncode:
         raise ValueError('OpenCSD 解码失败：' + (process.stderr or b'').decode('utf-8', 'replace')[-3000:])
@@ -186,39 +185,71 @@ def decode_stream(id_stream, elf, workdir, config=None, sources=None, max_events
                      unprocessedBytes=max(0, len(id_stream) - processed),
                      overlapBytes=0, unaccountedBytes=max(0, len(id_stream) - processed)))
 
-    with (workdir / 'decoded.json').open('w', encoding='utf-8') as out:
-        out.write('{')
-        for key, value in result.items():
-            out.write(json.dumps(key, ensure_ascii=False) + ':'
-                      + json.dumps(value, ensure_ascii=False) + ',')
-        _write_array(out, events_jsonl, 'events')
-        out.write(',')
-        _write_array(out, packets_jsonl, 'packets')
-        out.write(',')
-        _write_array(out, elements_jsonl, 'elements')
-        out.write('}')
+    # Keep the same predicate/call-stack semantics as the ordinary web decoder.
+    # Unique PCs are bounded by the executable image, not by loop iterations.
+    unique = {}
+    for event in JsonLines(events_jsonl, seq):
+        if event['kind'] == 'instruction':
+            unique.setdefault(event['pc'], event)
+    predicates = possible_predicates(image, unique.values())
+    del unique
+    enriched = workdir / 'events.enriched.jsonl'
+    with enriched.open('w', encoding='utf-8') as output:
+        def events():
+            block = []
+            def drain():
+                mark_execution(block, predicates)
+                for event in block:
+                    yield event  # analyze_calls adds callPath before iteration resumes
+                    output.write(json.dumps(event, ensure_ascii=False) + '\n')
+            for event in JsonLines(events_jsonl, seq):
+                block.append(event)
+                if len(block) >= 4096:
+                    yield from drain()
+                    block.clear()
+            yield from drain()
+        result['analysis'] = analyze_calls(events())
+    enriched.replace(events_jsonl)
+    result['events'] = JsonLines(events_jsonl, seq)
+    result['packets'] = JsonLines(packets_jsonl, packets_n)
+    result['elements'] = JsonLines(elements_jsonl, elements_n)
+    result['quality'] = byte_accounting(result)
+    result['summary']['executed'] = sum(e['kind'] == 'instruction' and e.get('executed') is True for e in result['events'])
+    result['summary']['unknownExecution'] = result['quality']['unknownExecution']
+    result['summary']['packetIssues'] = result['quality']['packetIssues']
+    result['summary']['functions'] = {r['function']: r['knownExecuted'] for r in result['analysis']['functions'] if r['knownExecuted']}
+    result['version'] = 3
+    result['streamed']['schema'] = 2
+    for key in ('events', 'packets', 'elements'):
+        result.pop(key)
+    (workdir / 'decoded.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
     return result
 
 
 def decode_capture_stream(csv_path, elf, workdir, config=None, sources=None, fraction=0.25,
-                          clock=0, data=None, max_events=None):
+                          clock=0, data=None, max_events=None, glitch_ns=0):
     """从 LA 的 CSV 开始走完整条流式链路（取样相位 + TPIU 解复用 + 解码）。"""
     from trace_port import extract
     from tpiu_demux import demux
 
     csv_path, workdir = Path(csv_path).resolve(), Path(workdir).resolve()
     config = decoder_config(config)
-    physical, candidates = extract(csv_path, clock, data or [1, 2, 3, 4], fraction)
+    physical, candidates = extract(csv_path, clock, data or [1, 2, 3, 4], fraction, glitch_ns)
     valid = []
+    failures=[]
+    workdir.mkdir(parents=True,exist_ok=True)
+    (workdir/'physical.json').write_text(json.dumps(physical,ensure_ascii=False),encoding='utf8')
     for phase, raw in enumerate(candidates):
         try:
             frames, streams = demux(raw)
             if int(config['traceid']) in streams and frames['frames']:
                 valid.append((phase, frames, streams))
-        except ValueError:
+        except ValueError as error:
+            failures.append({'phase':phase,'error':str(error)})
             continue
     if len(valid) != 1:
-        raise ValueError(f'不能唯一确定 TPIU 字节相位：{len(valid)} 个候选；请检查通道和取样位置。')
+        (workdir/'demux-errors.json').write_text(json.dumps(failures,ensure_ascii=False),encoding='utf8')
+        raise ValueError(f'不能唯一确定 TPIU 字节相位：{len(valid)} 个候选；请检查通道和取样位置。'+ (' '+failures[-1]['error'] if failures else ''))
     phase, frames, streams = valid[0]
     workdir.mkdir(parents=True, exist_ok=True)
     (workdir / 'tpiu.bin').write_bytes(candidates[phase])
@@ -229,15 +260,17 @@ def decode_capture_stream(csv_path, elf, workdir, config=None, sources=None, fra
                            max_events=max_events)
     result['physical'] = physical
     result['framing'] = framing
-    result['capture'] = {'name': csv_path.name,
-                         'sha256': hashlib.sha256(csv_path.read_bytes()).hexdigest()}
-    # 把 physical/framing/capture 也补进 decoded.json 的尾部（重写头部之外的键）
-    text = (workdir / 'decoded.json').read_text(encoding='utf-8')
-    extra = ''.join(',' + json.dumps(k, ensure_ascii=False) + ':'
-                    + json.dumps(v, ensure_ascii=False)
-                    for k, v in (('physical', physical), ('framing', framing),
-                                 ('capture', result['capture'])))
-    (workdir / 'decoded.json').write_text(text[:-1] + extra + '}', encoding='utf-8')
+    with csv_path.open('rb') as stream:
+        capture_hash = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024*1024), b''):
+            capture_hash.update(chunk)
+    result['capture'] = {'name': csv_path.name, 'sha256': capture_hash.hexdigest()}
+    # Recompute physical boundary fields after attaching framing. No large JSON reread.
+    streams_result = {**result, 'events': JsonLines(workdir / 'events.jsonl', result['streamed']['events']),
+                      'packets': JsonLines(workdir / 'packets.jsonl', result['streamed']['packets']),
+                      'elements': JsonLines(workdir / 'elements.jsonl', result['streamed']['elements'])}
+    result['quality'] = byte_accounting(streams_result)
+    (workdir / 'decoded.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
     return result
 
 
@@ -252,11 +285,7 @@ def export_simplified_stream(workdir, out_path):
     clean = lambda text: str(text).replace('*/', '* /')          # noqa: E731
 
     files, seen = [], set()
-    for line in events.open(encoding='utf-8'):
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
+    for event in JsonLines(events,0):
         f = event.get('file')
         if f and f not in seen:
             seen.add(f)
@@ -270,11 +299,7 @@ def export_simplified_stream(workdir, out_path):
             out.write('/* 配套文件：' + clean(base(f)) + ' = ' + clean(f) + ' */\n')
         last = None
         context = None
-        for line in events.open(encoding='utf-8'):
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
+        for event in JsonLines(events,0):
             seq = event.get('seq', rows)
             if event.get('kind') != 'instruction':
                 if event.get('type') in (1, 2, 3, 6, 7, 8, 9, 10):
@@ -284,6 +309,11 @@ def export_simplified_stream(workdir, out_path):
                 continue
             file, line_no = event.get('file', ''), event.get('line')
             function = event.get('function', '')
+            if event.get('executionState') == 'unknown' or event.get('executed') is None:
+                out.write('/* #' + str(seq) + ' 条件执行状态未知，不视为已证实执行 */\n')
+                rows += 1
+                last = context = None
+                continue
             if not event.get('executed'):
                 continue
             content = source_lines.get(file, [])

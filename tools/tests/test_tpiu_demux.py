@@ -23,16 +23,15 @@ class TpiuDemuxTests(unittest.TestCase):
         self.assertEqual(streams[3][0:2], b'\x10\x22')
         self.assertEqual(stats['id_changes'], [2, 3])
 
-    def test_sync_inside_frame_is_skipped_without_losing_data(self):
-        # 格式化器在半帧处转入 idle 会插 FSYNC。数据字节恒为偶数（LSB 区分控制字节），
-        # 所以 FF FF FF 7F 不可能是数据 -> 跳过 4 字节继续收集本帧，一个字节都不丢。
+    def test_full_sync_inside_frame_is_not_idle_padding(self):
         frame = bytes.fromhex('05 ab 10 22 24 44 36 66 48 88 5a aa 6c cc 7e aa')
+        for split in range(2, 16, 2):
+            with self.subTest(split=split), self.assertRaisesRegex(ValueError, 'TPIU'):
+                demux(FSYNC + frame[:split] + FSYNC + frame[split:])
+        # Halfword idle fill, unlike full sync, is legal within a frame.
         expected = demux(FSYNC + frame)[1]
-        stats, streams = demux(FSYNC + frame[:4] + FSYNC + frame[4:])
-        self.assertEqual(streams, expected)
-        self.assertEqual(stats['frames'], 1)
-        self.assertGreaterEqual(stats['mid_frame_fsyncs'], 1)
-        self.assertEqual(stats['idle_resyncs'], 0)
+        for split in range(2, 16, 2):
+            self.assertEqual(demux(FSYNC + frame[:split] + HSYNC + frame[split:])[1], expected)
 
     def test_partial_final_sync_is_preserved_as_capture_boundary(self):
         frame = bytes.fromhex('05 ab 10 22 24 44 36 66 48 88 5a aa 6c cc 7e aa')
@@ -45,14 +44,9 @@ class TpiuDemuxTests(unittest.TestCase):
             self.assertEqual(stats['trailing_sync_bytes'], length)
             self.assertEqual(stats['trailing_raw_bytes'], length)
 
-    def test_bare_ff_pair_triggers_resync(self):
-        # 完整 FSYNC 会被跳过；只有"FF FF 后面不是 7F"（构不成 FSYNC）才走重对齐，
-        # 丢掉半帧并跳到下一个真 FSYNC，后面的帧照常解出。
-        frame = bytes.fromhex('05 ab 10 22 24 44 36 66 48 88 5a aa 6c cc 7e aa')
-        expected = demux(FSYNC + frame)[1]
-        stats, streams = demux(FSYNC + b'\x05\x11' + b'\xff\xff\x00\x00' + FSYNC + frame)
-        self.assertGreaterEqual(stats['idle_resyncs'], 1)
-        self.assertEqual(streams[2], expected[2])
+    def test_bare_ff_pair_is_not_silently_discarded(self):
+        with self.assertRaisesRegex(ValueError, 'TPIU'):
+            demux(FSYNC + b'\x05\x11\xff\xff\x00\x00' + FSYNC)
 
 
 if __name__ == '__main__':

@@ -4,13 +4,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(r'E:\web-etm-trace')
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 from decode_trace import decode_capture          # noqa: E402
 
-rec = Path(sys.argv[1])
-span = float(sys.argv[2]) if len(sys.argv) > 2 else 0.004
-starts = [float(x) for x in (sys.argv[3].split(',') if len(sys.argv) > 3
+if '--live-buffer' not in sys.argv:
+    raise SystemExit('此工具导出当前 LA 缓冲；确认已经加载对应 KVDAT 后，显式传 --live-buffer，避免采集错配')
+args=[a for a in sys.argv[1:] if a!='--live-buffer']
+rec = Path(args[0])
+span = float(args[1]) if len(args) > 1 else 0.004
+starts = [float(x) for x in (args[2].split(',') if len(args) > 2
                              else '0.48,0.50,0.52,0.54,0.56,0.58'.split(','))]
 meta = json.loads((rec / 'meta.json').read_text(encoding='utf-8'))
 config = {k: int(v) for k, v in meta['etm'].items()}

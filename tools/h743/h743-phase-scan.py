@@ -2,7 +2,7 @@
 import sys
 from pathlib import Path
 
-ROOT = Path(r'E:\web-etm-trace')
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 from trace_port import extract          # noqa: E402
 from tpiu_demux import demux            # noqa: E402

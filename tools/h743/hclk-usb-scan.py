@@ -11,10 +11,10 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(r'E:\web-etm-trace')
+ROOT = Path(__file__).resolve().parents[2]
 GCC = 'E:/Share/env-windows/tools/gnu_gcc/arm_gcc/mingw/bin/arm-none-eabi-gcc.exe'
 BUILD = ROOT / 'firmware/stm32h743_cdc_trace/build.ps1'
-FLASH = ROOT / 'tmp/h743-flash.ps1'
+FLASH = ROOT / 'tools/h743/h743-flash.ps1'
 sys.path.insert(0, str(ROOT / 'tools'))
 
 

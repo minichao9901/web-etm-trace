@@ -352,7 +352,7 @@ def cmd_info(args):
         cpuid = t.r(0xE000ED00)
         devid = t.r(0x5C001000)
         print(f'CPUID     = {cpuid:#010x}  (part {(cpuid>>4)&0xFFF:#05x})')
-        print(f'DBGMCU ID = {devid:#010x}  DEV_ID {(devid>>16)&0xFFF:#05x} REV {devid&0xFFFF:#06x}')
+        print(f'DBGMCU ID = {devid:#010x}  DEV_ID {devid&0xFFF:#05x} REV {(devid>>16)&0xFFFF:#06x}')
         for name, addr in (('RCC_CR', 0x58024400), ('RCC_PLLCFGR', 0x5802442C),
                            ('RCC_PLL1DIVR', 0x58024430), ('RCC_D2CCIP2R', 0x58024454),
                            ('RCC_D1CFGR', 0x58024418), ('DBGMCU_CR', DBGMCU_CR),
@@ -362,8 +362,8 @@ def cmd_info(args):
         q = (divr >> 16) & 0x7F
         r = (divr >> 24) & 0x7F
         pllcfgr = t.r(0x5802442C)
-        print(f'PLL1 Q={q+1} R={r+1}  DIVQ1EN={1 if pllcfgr & (1<<16) else 0} '
-              f'DIVR1EN={1 if pllcfgr & (1<<24) else 0}')
+        print(f'PLL1 Q={q+1} R={r+1}  DIVQ1EN={1 if pllcfgr & (1<<17) else 0} '
+              f'DIVR1EN={1 if pllcfgr & (1<<18) else 0}')
         t.unlock(ETM)
         idr1 = t.r(ETM + 0x1E4)
         print(f'ETM IDR1  = {idr1:#010x}  arch v{(idr1>>8)&0xF}')
@@ -507,6 +507,8 @@ def cmd_span(args):
 
     触发点为 0。长窗会超过解码器的事件上限，所以"一气呵成"的采集按窗口分段看。
     """
+    if not getattr(args,'live_buffer',False):
+        raise ValueError('span 会导出当前 LA 缓冲，不会自动加载记录中的 KVDAT；请先确认对应波形已加载，再显式传 --live-buffer，避免把不同采集的波形与 ELF 错配')
     from decode_trace import decode_capture, export_source
     record = Path(args.record).resolve()
     meta = json.loads((record / 'meta.json').read_text(encoding='utf-8'))
@@ -563,10 +565,11 @@ def main():
     a.add_argument('--record', required=True)
     a.add_argument('--fraction', type=float, default=0.25)
     a.add_argument('--stream', action='store_true',
-                   help='流式解码：内存 O(1)，可解任意长度（整段秒级），同时导出简化 C')
+                   help='流式展开并分页；CSV/ELF/调用树仍占内存，同时导出简化 C')
     a.add_argument('--max-events', type=int, default=0, help='流式模式下的可选上限，0=无上限')
     a.set_defaults(func=cmd_decode)
     a = sub.add_parser('span')
+    a.add_argument('--live-buffer',action='store_true',help='确认当前 LA 波形确属该记录；否则拒绝导出')
     a.add_argument('--record', required=True)
     a.add_argument('--start', type=float, required=True)
     a.add_argument('--end', type=float, required=True)

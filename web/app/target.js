@@ -98,7 +98,7 @@ export class EtmTarget {
     const device=await this.read(part===0xc27?0x5c001000:0xe0042000);
     const port=identifyTarget(cpuid,device,this.profile);
     if(!port)throw Error(`未预置此芯片：CPUID ${hex(cpuid)} / DEV_ID ${hex(device&4095)}`);
-    const traceSupported=port.traceValidated;
+    const traceSupported=!!(port.traceValidated||port.traceImplemented);
     const config={};let width=null;
     if(traceSupported&&port.id==='stm32f103ze'){
       this.traceFamily='f103';const f=await inspectF103(this);Object.assign(config,f.config);width=f.width;
@@ -120,7 +120,7 @@ export class EtmTarget {
     }catch(e){clockError=e.message;}
     this.breakpoints.capacity=decodeFpCtrl(await this.read(0xe0002000)).numCode;
     this.info={cpuid,device,profile:port.id,name:port.name,core:port.core,etmVersion:port.etmVersion,traceSupported,
-      traceStatus:traceSupported?port.id==='stm32f103ze'?'F103ZE 48/24 MHz Kingst 联动与 ETMv3 解码已验收；封装须有 PE2～PE6':'H7B0 70/35 MHz 已验收；同组其他型号仍需实测':'型号/时钟/断点可用；本型号 trace 配置与解码尚未验收',
+      traceStatus:traceSupported?port.id==='stm32f103ze'?'F103ZE 48/24 MHz Kingst 联动与 ETMv3 解码已验收；封装须有 PE2～PE6':port.id==='stm32h743'?'H743 ETMv4 实验适配：推荐 CPU 60 / TRACECLK 30 MHz；同组其他型号未验收':'H7B0 70/35 MHz 已验收；同组其他型号仍需实测':'型号/时钟/断点可用；本型号 trace 配置与解码尚未验收',
       flashLimit:port.id==='stm32h7b0'?0x08020000:port.flashLimit,traceOptions:traceCapabilities(port.id,config),
       config,halted:await this.isHalted(),rcc,clocks,clockError,hseHz:this.hseHz,width};return this.info;
   }

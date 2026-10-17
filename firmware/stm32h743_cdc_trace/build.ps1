@@ -3,7 +3,7 @@
 # 用法：
 #   pwsh -NoProfile -File .\build.ps1                    # CPU 480MHz / TRACEPORTCK 480MHz(VCO 960/R=2)
 #   pwsh -NoProfile -File .\build.ps1 -TraceR 4          # TRACEPORTCK 改 240MHz
-#   （本工程固定 480MHz —— 阿波罗 H743 + 25MHz 晶振，PLLN=192；要降频改 src/main.c）
+#   pwsh -File .\build.ps1 -CoreMHz 60 -TraceR 8  # 推荐 CPU60 / TRACECLK30
 #
 # 产物：build\fw.elf / fw.bin / fw.hex，并在根目录放一份副本。
 # 只编译，不烧录；固件**不配置 ETM**，trace 由外部 SWD 工具配置。
@@ -12,10 +12,12 @@ param(
     [ValidateSet(0, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 128)][int]$TraceR = 0,
     [ValidateSet('External', 'Internal')][string]$UsbSupply = 'External',
     # AHB/HCLK 分频（测试"AHB 太低 USB 不工作"）：HCLK = SYSCLK / AhbDiv
-    [ValidateSet(1, 2, 4, 8, 16)][int]$AhbDiv = 1,
+    [ValidateSet(0, 1, 2, 4, 8, 16)][int]$AhbDiv = 0,
     # TRDT 用哪个频率算：Hclk=按 AHB 查表（正确）；Core=沿用 SystemCoreClock（旧行为，A/B 用）
     [ValidateSet('Hclk', 'Core')][string]$Trdt = 'Hclk',
-    [string]$Gcc
+    [string]$Gcc,
+    [string]$OutputDir,
+    [switch]$NoPublish
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot '..\tools\BuildTools.psm1') -Force
@@ -29,7 +31,7 @@ $h7Root = $PSScriptRoot
 if (-not $Gcc) { $Gcc = (Get-Command arm-none-eabi-gcc).Source }
 $h7Bin = Split-Path -Parent $Gcc
 $h7Sdk = Join-Path $h7Root 'sdk'
-$h7Build = Join-Path $h7Root 'build'
+$h7Build = if ($OutputDir) { [IO.Path]::GetFullPath($OutputDir) } else { Join-Path $h7Root 'build' }
 New-Item -ItemType Directory -Path $h7Build -Force | Out-Null
 
 # ---------------------------------------------------------------- 时钟档位
@@ -37,8 +39,8 @@ New-Item -ItemType Directory -Path $h7Build -Force | Out-Null
 #   480 档：VCO=960MHz，P=2 → SYSCLK 480MHz；TRACECLK = VCO/R/2（R 由 -TraceR 选）。
 #   同频档（-CoreMHz 35..90）：VCO = 8f，P=8，R=4，D1CPRE=/1 → CPU = TRACECLK = f。
 $h7M = 5
-if ($CoreMHz -eq '480') {
-    $h7N = 192; $h7P = 2
+if ($CoreMHz -in @('480', '240')) {
+    $h7N = if ($CoreMHz -eq '480') { 192 } else { 96 }; $h7P = 2
     $h7R = if ($TraceR -ne 0) { $TraceR } else { 2 }
     $h7D1CPRE = 'RCC_SYSCLK_DIV1'; $h7HPRE = 'RCC_HCLK_DIV2'; $h7Lat = 'FLASH_LATENCY_4'
 } else {
@@ -55,7 +57,7 @@ if ($CoreMHz -eq '480') {
 # 物理 TRACECLK = VCO / R / 2
 $h7TraceMHz = (25000000 / $h7M) * $h7N / $h7R / 2 / 1000000
 # AHB 分频覆盖（默认取档位自带的 HPRE）
-if ($AhbDiv -gt 1) { $h7HPRE = "RCC_HCLK_DIV$AhbDiv" }
+if ($AhbDiv -gt 0) { $h7HPRE = "RCC_HCLK_DIV$AhbDiv" }
 
 $h7Flags = @(
     '-mcpu=cortex-m7', '-mthumb', '-mfpu=fpv5-d16', '-mfloat-abi=hard',
@@ -128,7 +130,7 @@ $h7Objects += $h7StartupObj
 
 # ---------------- 链接 ----------------
 # 用 -nostartfiles：H7 的 ST 启动文件自己准备栈与向量，不需要 crt0；
-# 同时链接脚本里 PROVIDE(_init=0) 兜住 __libc_init_array 对 _init 的引用。
+# src/runtime.c 提供真实 _init/_fini，禁止将 _init 链接到零地址。
 $h7Elf = Join-Path $h7Build 'fw.elf'
 $r = Invoke-Tool -Exe $Gcc -Args (@($h7Flags) + @($h7Objects) + @("-T$h7Root\ld\stm32h743.ld", '-nostartfiles',
     '-specs=nano.specs', '-specs=nosys.specs', '-Wl,--gc-sections',
@@ -143,7 +145,7 @@ foreach ($h7Fmt in @(@('binary', 'bin'), @('ihex', 'hex'))) {
 Write-Output (Invoke-Tool -Exe "$h7Bin\arm-none-eabi-size.exe" -Args @($h7Elf)).Stdout
 (Invoke-Tool -Exe "$h7Bin\arm-none-eabi-nm.exe" -Args @('-n', '-S', $h7Elf)).Stdout | Set-Content -LiteralPath "$h7Build\fw.symbols.txt" -Encoding utf8
 (Invoke-Tool -Exe "$h7Bin\arm-none-eabi-objdump.exe" -Args @('-d', '-S', $h7Elf)).Stdout | Set-Content -LiteralPath "$h7Build\fw.disasm.txt" -Encoding utf8
-foreach ($h7Ext in @('elf', 'bin', 'hex')) {
+foreach ($h7Ext in $(if ($NoPublish) { @() } else { @('elf', 'bin', 'hex') })) {
     Copy-Item -LiteralPath "$h7Build\fw.$h7Ext" -Destination "$h7Root\fw.$h7Ext" -Force
 }
 

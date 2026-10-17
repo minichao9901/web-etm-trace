@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-ROOT = Path(r'E:\web-etm-trace')
+ROOT = Path(__file__).resolve().parents[2]
 ROWS = [
     ('CPU=trace=30 (5ms)', 'captures/h743-sweep/30mhz'),
     ('CPU=60 / trace=30 (5ms)', 'captures/h743/cpu60-trace30'),

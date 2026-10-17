@@ -15,7 +15,7 @@ import zipfile
 from urllib.parse import urlsplit
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_file, send_from_directory, abort
+from flask import Flask, jsonify, request, send_file, send_from_directory, abort, g
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -24,6 +24,8 @@ from decode_trace import DEFAULT_CONFIG, Image, decode_capture, export_source, d
 from flow_analysis import enrich
 from kingst_la import Vis, do_export, read_glitch_settings
 from record_store import RecordStore
+from stream_store import attach_streams, JsonLines
+from decode_stream import decode_capture_stream, decode_stream, export_simplified_stream
 from breakpoint_resolver import resolve_breakpoint
 from source_export import simplified_html
 
@@ -32,8 +34,18 @@ app.config['MAX_CONTENT_LENGTH'] = 150 * 1024 * 1024
 RECORDS = ROOT / 'records'
 RECORDS.mkdir(exist_ok=True)
 jobs = {}
+CAPTURE_PROTOCOL=2
 lock = threading.RLock()
 stop_guard = threading.Lock()
+def file_hash(path):
+    # Do not cache solely by size/mtime: Windows permits both to be preserved
+    # after edits. Integrity checks must still detect changed capture/ELF bytes.
+    digest=hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda:stream.read(1024*1024),b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 ACTIVE = ('queued', 'starting', 'armed', 'saving', 'decoding')
 
 
@@ -58,6 +70,25 @@ def directory(sid):
     if not sid or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in sid):
         raise ValueError('记录 ID 无效。')
     return RECORDS / sid
+
+
+_record_locks={}
+def record_guard(sid):
+    with lock:return _record_locks.setdefault(sid,threading.RLock())
+
+@app.before_request
+def decoded_record_guard():
+    sid=(request.view_args or {}).get('sid')
+    if sid and request.endpoint!='start_decode':
+        guard=record_guard(sid)
+        if not guard.acquire(blocking=False):
+            return jsonify(error='该记录正在解码或更新索引，请等待当前任务完成后重试；原始采集保留'),409
+        g.decoded_record_guard=guard
+
+@app.teardown_request
+def release_decoded_record_guard(error):
+    guard=g.pop('decoded_record_guard',None)
+    if guard is not None:guard.release()
 
 
 def save(sid, metadata):
@@ -95,9 +126,9 @@ def meta(sid):
 
 def verify_record_inputs(sid,r,metadata):
     folder=directory(sid);raw=folder/metadata.get('input','capture.csv')
-    if r.get('capture',{}).get('sha256') and hashlib.sha256(raw.read_bytes()).hexdigest()!=r['capture']['sha256']:
+    if r.get('capture',{}).get('sha256') and file_hash(raw)!=r['capture']['sha256']:
         raise ValueError('原始输入与解码结果指纹不一致，请重新解码；旧结果不作为当前执行历史')
-    if r.get('elf',{}).get('sha256') and hashlib.sha256((folder/'firmware.elf').read_bytes()).hexdigest()!=r['elf']['sha256']:
+    if r.get('elf',{}).get('sha256') and file_hash(folder/'firmware.elf')!=r['elf']['sha256']:
         raise ValueError('ELF 与解码结果指纹不一致，请重新载入匹配镜像并解码')
     if r.get('config') and metadata.get('config') and r['config']!=metadata['config']:
         raise ValueError('保存的 ETM 配置与解码结果不一致，请重新解码')
@@ -105,7 +136,10 @@ def verify_record_inputs(sid,r,metadata):
 
 def result(sid):
     folder = directory(sid)
-    r = load_json(folder/'decoded.json')
+    decoded=folder/'decoded.json'
+    if decoded.stat().st_size>384*1024*1024:
+        raise ValueError('旧版整段结果超过安全内存限额，请点击单独解码，重新建立流式记录；原始记录保留')
+    r = attach_streams(load_json(decoded),folder)
     if r.get('version', 1) < 3:
         enrich(r, Image(folder / 'firmware.elf'))
         save_json(folder/'decoded.json',r)
@@ -114,10 +148,10 @@ def result(sid):
     if (folder/'etm.bin').exists() and r.get('quality') and 'processedBytes' in r['quality']:
         size=r.get('inputBytes',(folder/'etm.bin').stat().st_size)
         r['quality'].update(inputBytes=size,unprocessedBytes=max(0,size-r['quality']['processedBytes']),
-                            unaccountedBytes=max(0,size-r['quality']['accountedBytes']))
+                            unaccountedBytes=max(0,size-r['quality'].get('accountedBytes',0)))
     r.setdefault('targetSnapshot',metadata.get('targetSnapshot'))
     r.setdefault('captureScope',metadata.get('captureScope','unfiltered-window'))
-    r.setdefault('captureStart',capture_start_info(r.get('events',[]),metadata))
+    if 'captureStart' not in r:r['captureStart']=capture_start_info(r.get('events',[]),metadata)
     r['laFilter']=metadata.get('laFilter')
     phase_file=folder/'phase-validation.json'
     if phase_file.exists():
@@ -194,7 +228,7 @@ def elf_info(path):
                 sourceFiles=sorted({file for _,file,_ in image.lines.values() if file}),
                 functions=[dict(name=name,address=address,size=size,file=image.location(address)[1],line=image.location(address)[2])
                   for address,size,name in image.functions if any(a<=address<b for a,b in executable)],
-                captureEntry=functions.get('spi_trace_ready',functions.get('trace_workload',functions.get('main'))),
+                captureEntry=functions.get('spi_trace_ready',functions.get('trace_hook_entry',functions.get('trace_workload',functions.get('main')))),
                 segments=[dict(address=s['p_paddr'], data=base64.b64encode(s.data()).decode())
                           for s in flash])
 
@@ -220,6 +254,7 @@ def status():
     finally:
         v.close()
     return jsonify(connected=True, rates=[int(n) for n in rates.split()], error=error,
+                   captureProtocol=CAPTURE_PROTOCOL,softwareFilter=True,
                    decoder=(ROOT / 'build-native/etm_decode.exe').exists())
 
 
@@ -234,6 +269,7 @@ def firmware():
 
 
 PROFILES = {
+    'h743-cdc-60': ('H743 CDC · CPU 60 / TRACECLK 30 MHz · 实验档', 'stm32h743_cdc_trace/fw.elf'),
     'spi-70': ('SPI · 70 MHz CPU / 35 MHz trace · 稳定基准 v1', 'stm32h7b0_spi_trace/stable-70-35-v1/fw.elf'),
     'spi-140-r8': ('SPI · 140 MHz CPU / 35 MHz trace · 对照档', 'stm32h7b0_spi_trace/fw-140-r8.elf'),
     'spi-140': ('SPI · 140 MHz CPU / 70 MHz trace · DDR/滤波验证档', 'stm32h7b0_spi_trace/fw-140.elf'),
@@ -392,7 +428,10 @@ def record_kind(sid,row,demo=None):
 
 @app.get('/api/records/<sid>')
 def get_record(sid):
-    return jsonify(result(sid))
+    r=result(sid)
+    if r.get('streamed',{}).get('schema')==2:
+        r={k:v for k,v in r.items() if k not in ('events','packets','elements','sources')}
+    return jsonify(r)
 
 
 @app.post('/api/sources/<sid>')
@@ -408,7 +447,7 @@ def attach_sources(sid):
             r['sources'][file] = matches[0]
     folder = directory(sid)
     save_json(folder/'sources.json',r['sources'])
-    save_json(folder/'decoded.json',r)
+    if r.get('streamed',{}).get('schema')!=2:save_json(folder/'decoded.json',r)
     return jsonify(sources=r['sources'])
 
 
@@ -457,23 +496,39 @@ def capture_start_info(events,metadata):
                 entryRecovered=present,firstMatchesEntry=bool(first and first.get('pc')==entry))
 
 
-def decode_job(jid, sid):
+def decode_job(jid,sid):
+    with record_guard(sid):summary=_decode_job(jid,sid)
+    if summary is not None:change(jid,state='done',summary=summary)
+
+def _decode_job(jid, sid):
     try:
         change(jid, state='decoding')
         folder, m = directory(sid), meta(sid)
         sources = load_json(folder/'sources.json') if (folder / 'sources.json').exists() else None
-        r = decode_capture(folder / m['input'], folder / 'firmware.elf', folder, m['config'], sources,
-                           fraction=m.get('fraction', .25), clock=m.get('clock', 0), data=m.get('data', [1, 2, 3, 4]))
+        raw=folder/m['input']
+        streamed=bool(raw.suffix.lower()=='.bin' or m.get('seconds',0)>.02 or raw.stat().st_size>50*1024*1024)
+        if streamed:
+            if raw.suffix.lower()=='.csv':
+                r=decode_capture_stream(raw,folder/'firmware.elf',folder,m['config'],sources,
+                    fraction=m.get('fraction',.25),clock=m.get('clock',0),data=m.get('data',[1,2,3,4]),glitch_ns=m.get('glitchNs',0))
+            else:
+                r=decode_stream(raw.read_bytes(),folder/'firmware.elf',folder,m['config'],sources)
+                r['capture']={'name':raw.name,'sha256':file_hash(raw)}
+        else:
+            r = decode_capture(raw, folder / 'firmware.elf', folder, m['config'], sources,
+                               fraction=m.get('fraction', .25), clock=m.get('clock', 0), data=m.get('data', [1, 2, 3, 4]),glitch_ns=m.get('glitchNs',0))
         r['targetSnapshot']=m.get('targetSnapshot')
         r['captureScope']=m.get('captureScope','unfiltered-window')
-        r['captureStart']=capture_start_info(r['events'],m)
+        r['captureStart']=capture_start_info(attach_streams(dict(r),folder)['events'],m)
         r['laFilter']=m.get('laFilter')
         save_json(folder/'decoded.json',r)
-        save_json(folder/'sources.json',r['sources'])
+
+        if 'sources' in r:save_json(folder/'sources.json',r['sources'])
         m['summary'] = r['summary']
         m.pop('error',None);m.pop('errorStage',None);m['decodeStatus']='done'
         save(sid, m)
-        change(jid, state='done', summary=r['summary'])
+        if streamed:browse_store(sid).ensure()
+        return r['summary']
     except (Exception,SystemExit) as error:
         record_failure(sid,error,'decode')
         change(jid, state='error', error=str(error))
@@ -525,7 +580,8 @@ def import_record():
         request.files['elf'].save(folder / 'firmware.elf')
         config = json.loads(request.form.get('config', '{}'))
         m = dict(input=filename, name=uploaded.filename, config=decoder_config(config),
-                 configBasis='user-provided', fraction=float(request.form.get('fraction', .25)))
+                 configBasis='user-provided', fraction=float(request.form.get('fraction', .25)),
+                 glitchNs=float(request.form.get('glitchNs',0)) if suffix=='.csv' else 0)
         sources = {}
         for file in request.files.getlist('sources'):
             sources[file.filename.replace('\\', '/')] = file.read().decode('utf-8-sig', 'replace')
@@ -651,8 +707,10 @@ def start_capture():
              data=[int(n) for n in o.get('data', [1, 2, 3, 4])],
              config=decoder_config(o.get('config', {})), elfId=o.get('elfId'),sourceSnapshot=o.get('sourceSnapshot'),
              libraryOrigin='validation' if o.get('libraryOrigin')=='validation' else 'user',
-             targetVerified=bool(o.get('targetVerified')), fraction=float(o.get('fraction', .25)),
+             targetVerified=bool(o.get('targetVerified')), fraction=float(o.get('fraction', .25)),glitchNs=float(o.get('glitchNs',0)),
              targetSnapshot=o.get('targetSnapshot'),captureScope=o.get('captureScope','unfiltered-window'),captureEntry=o.get('captureEntry'))
+    if not math.isfinite(o['glitchNs']) or not 0<=o['glitchNs']<=100:
+        raise ValueError('软件滤波须为 0～100 ns，0 表示关闭')
     if not 0 < o['fraction'] < 1:
         raise ValueError('取样位置必须介于 0 和 1。')
     if not math.isfinite(o['threshold']) or not -4<=o['threshold']<=4:
@@ -765,13 +823,25 @@ def download(sid, kind):
     if kind in ('source','simplified','simplified-html','csv') and request.args.get('fromSeq') is not None:
         start=int(request.args['fromSeq']);end=int(request.args.get('toSeq',len(r['events'])-1))
         if start<0 or end<start:raise ValueError('导出序号区间无效')
+        if r.get('streamed',{}).get('schema')==2 and end-start>=200000:
+            raise ValueError('本导出格式请选取不超过 20 万条记录的局部区间；整段可导出简化源码 .c')
         r={**r,'events':[e for e in r['events'] if start<=e['seq']<=end],'exportRange':dict(start=start,end=end)}
+    if r.get('streamed',{}).get('schema')==2 and request.args.get('fromSeq') is None:
+        if kind=='simplified':
+            path=folder/('export-simplified-'+uuid.uuid4().hex+'.c');export_simplified_stream(folder,path)
+            response=send_file(path,as_attachment=True,download_name='etm-simplified.c',mimetype='text/plain; charset=utf-8')
+            response.call_on_close(lambda:path.unlink(missing_ok=True))
+            return response
+        if kind in ('source','simplified-html','csv'):
+            raise ValueError('长记录请先在图中选择执行区间再导出，或导出整段简化源码 .c')
     if kind=='simplified-html':
         return send_file(io.BytesIO(simplified_html(r).encode('utf-8')),as_attachment=True,download_name='etm-simplified.html',mimetype='text/html; charset=utf-8')
     if kind in ('source', 'simplified'):
         text = export_source(r, kind == 'simplified')
         return send_file(io.BytesIO(text.encode('utf-8')), as_attachment=True,
                          download_name='etm-' + kind + '.c', mimetype='text/plain; charset=utf-8')
+    if kind == 'json' and r.get('streamed',{}).get('schema')==2:
+        return send_file(folder/'decoded.json',as_attachment=True,download_name='decoded.json')
     if kind == 'json':
         return send_file(io.BytesIO(json.dumps(r, ensure_ascii=False).encode('utf-8')), as_attachment=True, download_name='decoded.json')
     if kind == 'csv':

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EtmTarget} from '../../web/app/target.js';
-import {decodeClocks,targetPort} from '../../web/app/clock.js';
+import {decodeClocks,targetPort,completeClocks} from '../../web/app/clock.js';
 import {traceCapabilities} from '../../web/app/trace-options.js';
 
 function h7Configuration(idr0=0x80006e1){
@@ -99,4 +99,10 @@ test('cancelled entry removes its comparator and keeps target halted',async()=>{
 test('disabled FPB with retained foreign comparators is left untouched',async()=>{
   const {t,mem}=breakpointTarget();mem.set(0xe0002000,0x60);
   try{await assert.rejects(t.runTo(0x08002002),/保留了其他/);assert.equal(mem.get(0xe0002000),0x60);assert.equal(mem.get(0xe0002008),0x40001001);}finally{t.bus.close();}
+});
+
+test('H743 experimental adapter distinguishes CPU 60, HCLK 60 and physical TRACECLK 30',()=>{
+  const port=targetPort('stm32h743');assert.equal(port.traceImplemented,true);assert.equal(port.traceValidated,false);
+  const c=completeClocks(port,{cr:(1<<17)|(1<<25),cfgr:27,domain:0,pllSource:2|(5<<4),pllConfig:(1<<16)|(1<<18),pllDiv:95|(7<<9)|(7<<24),pllFrac:0},25e6);
+  assert.equal(c.coreHz,60e6);assert.equal(c.hclkHz,60e6);assert.equal(c.traceHz,60e6);assert.equal(c.physicalTraceHz,30e6);
 });

@@ -223,7 +223,7 @@ void usbd_cdc_acm_set_rts(uint8_t busid, uint8_t intf, bool rts)
     (void)rts;
 }
 
-void cdc_acm_init(uint8_t busid, uintptr_t reg_base)
+int cdc_acm_init(uint8_t busid, uintptr_t reg_base)
 {
     usbd_desc_register(busid, &cdc_descriptor);
 
@@ -232,7 +232,7 @@ void cdc_acm_init(uint8_t busid, uintptr_t reg_base)
     usbd_add_endpoint(busid, &cdc_out_ep);
     usbd_add_endpoint(busid, &cdc_in_ep);
 
-    usbd_initialize(busid, reg_base, usbd_event_handler);
+    return usbd_initialize(busid, reg_base, usbd_event_handler);
 }
 
 /* ======================= 发送 ======================= */
@@ -312,7 +312,7 @@ static void handle_command(const uint8_t *buf, uint32_t len)
     } else if (n == 0u) {
         /* 空行忽略 */
     } else {
-        cdc_puts("ERR UNKNOWN\r\n");
+        /* 普通文本已由主循环原样回显，不追加命令错误。 */
     }
 }
 
@@ -355,7 +355,7 @@ static void system_clock_init(void)
 
     /* ④ AXI/HCLK /2 = 240MHz，APB1/2/3 /2 = 120MHz，APB4 /4 = 60MHz */
     clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                    RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+                    RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_D1PCLK1 | RCC_CLOCKTYPE_D3PCLK1;
     clk.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
     clk.SYSCLKDivider = H7_CDC_D1CPRE;
     clk.AHBCLKDivider = H7_CDC_HPRE;
@@ -437,7 +437,11 @@ int main(void)
     probe_stage(6);
 
     trace_hook_entry();
-    cdc_acm_init(0, USB_OTG_FS_PERIPH_BASE);
+    if (cdc_acm_init(0, USB_OTG_FS_PERIPH_BASE) != 0) {
+        g_clock_err |= 16u;
+        trace_log_printf("USB initialization failed; trace ready remains zero\r\n");
+        for (;;) { __WFI(); }
+    }
     trace_log_printf("usb initialized (USB_OTG_FS_PERIPH_BASE=0x%08lx)\r\n",
                      (unsigned long)USB_OTG_FS_PERIPH_BASE);
     probe_stage(7);

@@ -7,6 +7,18 @@ import server
 import kingst_la
 
 class LifecycleTests(unittest.TestCase):
+    def test_decoding_sidecars_are_not_exposed_as_a_mixed_record_and_jobs_remain_readable(self):
+        import threading
+        ready=threading.Event();release=threading.Event();sid='guarded-record'
+        def writer():
+            with server.record_guard(sid):ready.set();release.wait(3)
+        thread=threading.Thread(target=writer);thread.start();self.assertTrue(ready.wait(1))
+        jid=server.new_job(sid,'decoding')
+        try:
+            client=server.app.test_client()
+            self.assertEqual(client.get('/api/browse/'+sid+'/overview').status_code,409)
+            self.assertEqual(client.get('/api/jobs/'+jid).status_code,200)
+        finally:release.set();thread.join()
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.previous=server.RECORDS;server.RECORDS=Path(self.tmp.name)
         server.jobs.clear();self.elf='elf-'+'a'*32;server.directory(self.elf).mkdir();(server.directory(self.elf)/'firmware.elf').write_bytes(b'elf')
@@ -59,6 +71,10 @@ class LifecycleTests(unittest.TestCase):
         for value in [float('nan'),float('inf'),-float('inf'),-5,5]:
             with self.subTest(value=value),patch.object(server.threading,'Thread'):
                 r=self.capture(threshold=value);self.assertEqual(r.status_code,400,r.json);self.assertEqual(len(server.jobs),0)
+    def test_invalid_software_filter_is_rejected_before_job(self):
+        for value in [float('nan'),float('inf'),-1,101]:
+            with self.subTest(value=value),patch.object(server.threading,'Thread'):
+                r=self.capture(glitchNs=value);self.assertEqual(r.status_code,400,r.json);self.assertEqual(len(server.jobs),0)
     def test_queued_capture_can_be_cancelled_without_talking_to_la(self):
         jid=server.new_job('capture-a','queued')
         with patch.object(server,'Vis',side_effect=AssertionError('must not connect')):
