@@ -197,7 +197,45 @@ python -X utf8 tools\h743_etm.py decode --record captures\h743\full30
 python -X utf8 tools\h743_etm.py span --record captures\h743\full30 --start 0.590 --end 0.600
 ```
 
-## 8. 未完成 / 待办
+## 8. 用 Web 页面解码并导出「简化 C」
+
+同频 30MHz 这份记录除了走 `h743_etm.py`，也**完整走了一遍网页工具**（页面解码 + 页面导出），
+两条路径结果逐项一致。
+
+流程（真页面，不绕过 UI）：
+
+```powershell
+python -X utf8 server.py --port 8766          # 本地服务
+# 浏览器打开 http://127.0.0.1:8766/
+#   记录下拉选「H743 阿波罗 · CPU=TRACECLK=30MHz · 5ms · 同频档」→ 打开记录
+#   → 单独解码（POST /api/decode/<sid>）
+#   → 导出格式选「简化源码 .c」→ 导出（GET /api/download/<sid>/simplified）
+```
+
+自动化脚本：`tmp/etm-web-export.mjs`（CDP 驱动真页面：选记录→打开→解码→选格式→导出，
+并用 `Browser.setDownloadBehavior` 收下载文件）。
+
+记录落在 `records/h743-clk30-trace/`（由 `captures/h743-sweep/30mhz` 转成页面记录格式）。
+页面解码结果：
+
+| 指标 | 值 |
+|---|---:|
+| ETMv4 包 | 2,144 |
+| 指令范围 | 2,497 |
+| 指令 | **12,462**（执行 10,596） |
+| 源码映射 | 12,462（100%） |
+| 异常 / 缺口 / 包问题 | 2 / 3 / 8 |
+| TPIU | 616 帧，相位 1 |
+| 字节对账 | 输入 2,867 B，未处理 0，重叠 0 |
+
+导出产物：
+- `records/h743-clk30-trace/etm-simplified.c`（= `captures/h743-sweep/30mhz/etm-simplified.c`，98,974 字节）
+  —— 头部标出配套源码 `main.c` / `stm32h7xx_hal.c`，正文是按恢复顺序排列的源码行
+  （`main.c:449` 的 `g_trace.loops++`、`:451` 的 `if (rx_len)`、`:464` 的 1M 计数、`:469` 的 banner 判断）。
+- `captures/h743-sweep/30mhz/web-page-decode.png` —— 页面截图（记录名 / 12,470 条 /
+  函数轨迹 `main 10,576 · HAL_IncTick 14 · SysTick_Handler 6` / 执行流表逐条 `PC + 机器码 + main.c:464,469`）。
+
+## 9. 未完成 / 待办
 
 - **触发对齐偏晚**：`full30` 的 t=0 已落在 `main` 主循环里，`cdc_acm_init` 那段没进窗
   （初始化本身在记录里，但不在导出的解码窗内）。下次改成"先在 `trace_hook_entry` 稳住、
