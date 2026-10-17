@@ -20,7 +20,7 @@ export class EtmTarget {
     if(!this.Probe.supported())throw Error('请用支持 WebUSB 的桌面 Chrome / Edge 打开页面');
     let device=devices.length===1?devices[0]:null;
     if(!device){let timer;try{device=await Promise.race([navigator.usb.requestDevice({filters:[{vendorId:0x0d28}]}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('浏览器仍在等待 USB 设备选择；请选中探针后重新连接')),30000);})]);}finally{clearTimeout(timer);}}
-    this.probe=await this.Probe.open(device,{clockKhz:1000,skipClearHalt:true});
+    this.probe=await this.Probe.open(device,{clockKhz:1000});
     this.debugFault=false;this.probe.onLog=this.log;
     try{return await this.inspect();}catch(e){try{await this.disconnect();}catch(cleanup){this.log('连接失败后的清理错误（保留首次错误）：'+cleanup.message);}throw e;}
   }

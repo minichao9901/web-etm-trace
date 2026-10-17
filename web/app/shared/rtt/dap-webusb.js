@@ -319,6 +319,9 @@ export class WebUsbDapProbe {
       try { await withTimeout(d.clearHalt(dir, ep), 2000, `clearHalt(${dir})`); }
       catch (e){ console.warn(`clearHalt(${dir}) 失败：${e.message}`); }
     }
+    // 🚨 清陈旧响应只能靠上面这些 clearHalt（端点复位）。
+    //    **不要**用"一串短超时 transferIn 去排空"：WebUSB 没有取消接口，超时的那次
+    //    传输会一直挂着，把后续响应偷走 —— 实测会把「响应回显不匹配」变成「USB 读 超时」。
     await this.resync();
     this._watchUsb();
     this._ready = true;
