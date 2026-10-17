@@ -1,0 +1,211 @@
+# STM32H743 CDC + ETMv4 走通记录（2026-10-17）
+
+目标：以 `firmware/stm32h743_cdc_trace` 为基础，把 etm-trace 这一套在 H743（正点原子阿波罗板）上完整走一遍——
+先修通 CDC 枚举与回显、再打通 ETMv4/CSTF/ETF/TPIU + LA 采集 + OpenCSD 解码、做 CPU=TRACECLK 同频探索，
+最后抓一份"CDC 初始化 → 枚举 → `hello world!\n` 回显"的连续记录。
+
+硬件：阿波罗 STM32H743（HSE 25MHz），探针 akaLinkPro（0D28:0204，CMSIS-DAP v2.1.2），
+Kingst LA（socket 23367，上限 500MSa/s、深度 25 亿点）。
+LA 接线：CH0=PE2(TRACECLK)、CH1=PE3(D0)、CH2=PE4(D1)、CH3=PE5(D2)、CH4=PE6(D3)，阈值 1.65V。
+
+---
+
+## 1. 结论速览
+
+| 项 | 状态 |
+|---|---|
+| CDC ACM 枚举 + 命令行（PING/INFO/MARK/ECHO） | ✅ 已通（`VID_F055:7431` → `USB 串行设备 (COM43)`） |
+| ETMv4 配置 + TPIU 4 位并行 + LA 采集 + OpenCSD 解码 | ✅ 已通 |
+| 首次有效解码（CPU 480MHz / TRACECLK 30MHz） | ✅ 238,311 条指令、100% 映射源码、0 包错误 |
+| CPU == TRACECLK 同频采集与解码 | ✅ 可解（见第 5 节，成功率受限，原因已定） |
+| 连续 2s 采集覆盖 初始化→枚举→回显 | ✅ 已抓到（见第 5、6 节） |
+
+---
+
+## 2. 原始例程为什么跑不起来：`_init = 0`
+
+`ld/stm32h743.ld` 末尾原本是 `PROVIDE(_init = 0);`，而构建用 `-nostartfiles`，
+crti.o/crtn.o 不参与链接。反汇编证据（stock `build/fw.elf`）：
+
+```
+08006354 <__libc_init_array>:
+  ...
+  8006368: bl  8006d68 <___init_veneer>
+08006d68 <___init_veneer>:
+  8006d68: ldr.w pc, [pc]        ; 8006d6c: 00000001
+```
+
+即 `_init` 被解析成地址 `0x00000001`，`__libc_init_array()` **无条件调用** `_init()`
+→ 进 `main()` 之前就 UNDEFINSTR HardFault。
+
+修法（与 H7B0 工程一致）：新增 `src/runtime.c` 提供真实 `_init()/_fini()`，删掉 `PROVIDE`。
+
+## 3. CDC 在 H743 上不枚举的四条根因
+
+1. **USB 内核时钟源必须是 PLL3Q，不能用 HSI48。**
+   实机 `RCC_D2CCIP2R.USBSEL = 0b11`(HSI48)、`RCC_CR.HSI48RDY=1` 都正常，但
+   `USB2_OTG_FS` 的 **核软复位 `GRSTCTL.CSRST` 永不完成**（`GRSTCTL` 常驻 `0x80000001`），
+   于是 `dwc2_set_mode` 死等 `GINTSTS.CMOD`（强制 HOST/DEVICE 时 `GINTSTS` 一个字都不变）。
+   两处参考实现都用 PLL3Q：`STM32Cube_FW_H7_V1.11.2` 的
+   `Projects/STM32H743I-EVAL/Applications/USB_Device/CDC_Standalone`（PLL3: M=25 N=336 P=2 R=2 Q=7）
+   与已验证的 `firmware/stm32h7b0_cdc_trace`。换成 PLL3Q 后 `CSRST` 正常完成。
+   （注意：临时把 `USBSEL` 切到 PLL1Q 做对照是无效实验——PLL1Q 输出当时没使能。）
+
+2. **USB 供电处理整段缺失。** H7B0 工程里有 `HAL_PWREx_EnableUSBVoltageDetector()`
+   （`PWR_CR3.USB33DEN`，可选 `USBREGEN`），H743 那份移植时漏了。已补，并可经
+   `build.ps1 -UsbSupply External|Internal` 选择是否用片内稳压器。
+
+3. **`DCFG.DSPD` 选速判据错。** 原判据只看 `hw_params.hs_phy_type`。实机
+   `USB2_OTG_FS` 的 `GHWCFG2 = 0x229FE190` 同时报 `hs_phy_type=ULPI(2)` 与
+   `fs_phy_type=DEDICATED(1)`，于是被选成 `SPEED_HIGH_IN_FULL`(0b01, 30/60MHz)，
+   把专用 FS PHY 当 HS PHY 驱 → 主机报"设备描述符请求失败"。
+   改成 `fs_phy_type != 0 → SPEED_FULL(0b11, 48MHz)`（对 H7B0 行为不变）。
+
+4. **MspInit 少了外设复位与 `HAL_NVIC_ClearPendingIRQ`。**
+
+顺带核实的两条**否证**（不必再查）：
+- H743 的 `USB2_OTG_FS` FIFO 深度就是 **952 words**（`GHWCFG3=0x03B8D2E8`），
+  与 H7B0 一样，"FIFO 超容量"的解释不成立。
+- `GPIO_AF10_OTG2_FS` / `GPIO_AF10_OTG1_FS` / `GPIO_AF10_OTG_FS` 取值都是 `0x0A`，
+  写哪个都一样（H743 头文件里没有 `GPIO_AF10_OTG_FS` 这个名字）。
+
+验收：`COM43` 上 `PING`/`INFO` 正常（`sysclk=480000000 clk_err=0`），
+发 `hello world!\n` 原样回显。
+
+## 4. ETM 链路
+
+### 4.1 寄存器地址（RM0433 核对，与 RM0455 的 H7B0 同布局）
+
+| 组件 | 地址 |
+|---|---|
+| ETM | `0xE0041000` |
+| Trace funnel | `0x5C013000` |
+| ETF | `0x5C014000` |
+| TPIU | `0x5C015000` |
+| DBGMCU | `0x5C001000`（CR `+0x004`） |
+
+**TRACECLK 由 PLL1R 派生，物理 `TRACECLK = VCO / R / 2`**（RM0433 §"TRACECLK is the trace
+port output clock. It is derived from the PLL1 R divider output"）。H743 的
+`ETM IDR1=0x4100F401`（架构 v4）、`IDR0=0x080006E1`，与解码器默认配置完全一致。
+
+### 4.2 工具
+
+`tools/h743_etm.py`（pyOCD 驱动）把 `web/app/target.js` 里已验收过的 H7 配置路径搬过来：
+
+```
+info      读 CPUID / DBGMCU / RCC / ETM IDR
+etm-on    目标暂停下配置 trace 引脚(PE2–PE6=AF0) + ETM/ETF/TPIU，保存快照
+etm-off   恢复
+capture   复位并用 FPB 断点停在 --at-entry 符号 → 配 ETM → 武装 LA → 放行 CPU
+          →（可选）注入 CDC 回显 → 收 CSV/ELF/配置 → 可选解码
+span      从同一次采集的 LA buffer 里导出 [t0,t1] 时间窗再解码
+decode    对记录做 OpenCSD 解码
+```
+
+两个必须记住的坑（都踩过）：
+- **FPB 命中后必须摘掉比较器再放行**：PC 正停在断点那条指令上，FPB 是"取指命中就停"，
+  不摘就立刻再命中 → 目标永远卡在入口（表现为 USB 不枚举）。这正是本仓 dbg 页记过的坑。
+- **LA 的采样窗从 `start` 那一刻起算**：短窗必须先放行 CPU 再武装 LA；要 t=0 精确对齐
+  "CPU 开始产生 trace"就用 LA 触发（`--trigger '--reset --neg-edge 1'`）。
+
+### 4.3 首次有效解码
+
+CPU 480MHz / TRACECLK 30MHz（`-TraceR 16`），500MSa/s、2ms、取样相位 0.25：
+
+| 指标 | 值 |
+|---|---:|
+| ETMv4 包 | 15,978 |
+| 指令范围 | 47,666 |
+| 指令 | 238,311（执行 202,568） |
+| 源码映射 | 238,311（100%） |
+| 异常 / 缺口 / 包问题 | 2 / 1 / 0 |
+| 函数 | `main` 202,548 · `HAL_IncTick` 14 · `SysTick_Handler` 6 |
+| TPIU | 1,102 帧，相位 0，OpenCSD 1.8.3 无错 |
+
+记录：`captures/h743/t2/`（`decoded.json`、`native.jsonl`、`execution.c` 由 `h743_etm.py` 生成）。
+
+## 5. CPU == TRACECLK 同频
+
+档位（`build.ps1 -CoreMHz f`）：`VCO = 8f`、`P = 8`、`R = 4`、`D1CPRE = HPRE = 1`
+→ `CPU = SYSCLK = VCO/8 = f`，`TRACECLK = VCO/(2R) = f`。f 取 25…90（5 的倍数）。
+
+**同频会带来一个本质现象**：ETM 数据率 ∝ CPU，而端口容量 ∝ TRACECLK，于是
+利用率 = `8.2MB/s ÷ 480MHz` ≈ **1.7%**，与 f 无关 —— 端口 98% 时间在发空闲图案。
+这直接压到了 TPIU 解复用器的软肋：
+
+`tools/tpiu_demux.py` 原来把"帧内出现 `FF FF`"当致命错误直接抛。而格式化器在
+数据突发结束后会**在半帧处转入 idle**，流里就会出现 `FF FF`（空闲图案是 `FF 7F` 重复，
+数据结束处还会接 `FF FF FF 7F`）。格式化器保证数据字节是偶数（LSB 用于区分控制字节），
+所以帧内 `FF FF` 不可能是数据。修法：丢掉这个半帧、跳到下一个 FSYNC 重新对齐，
+记 `idle_resyncs` / `dropped_partial_frame_bytes`，不再让整条流失败（测试同步更新）。
+
+修好后 30MHz 同频可解：`packets 2144 / ranges 2497 / instructions 12462 / sourceMapped 12462`
+（5ms 窗、500MSa/s、相位 1，函数落在 `main` / `SysTick_Handler` / `HAL_IncTick`）。
+
+### 5.1 同频扫频结果（`tmp/h743-sweep.py`，500MSa/s × 5ms，各点独立构建+烧录+采集+解码）
+
+| CPU=TRACECLK | LA 采集 | 解出指令 | 说明 |
+|---:|---|---:|---|
+| 30 MHz | ✅ | **12,462** | 默认相位即可解，稳 |
+| 35 MHz | ✅ | 133 | 仅 f=0.15/0.20 可解，其余相位全失败 → **边缘** |
+| 40 MHz | ✅ | 0 | 所有相位（0.10–0.45）都解不出 |
+| 45 / 50 / 60 / 70 / 80 / 90 MHz | ✅ | 0 | 采到波形，但 ETM 流不可解 |
+
+**对照实验（区分"物理极限"与"稀疏流解析"）**：把 CPU 保持 480MHz（TPIU 端口利用率 ~55% 的密集流），
+只把 TRACECLK 提到 40MHz（`-TraceR 12`）——同样**所有相位都解不出**（`captures/h743/dense40`）。
+⇒ **约 30–35MHz 是这块板 + 这组接线 + 500MSa/s LA 的 TRACECLK 物理上限**，
+与 CPU 是否等于 TRACECLK 无关；H7B0 那份 SPI 验收也得到同一量级（35MHz 稳、46.667MHz 边缘），
+本板 PE2–PE6 上还挂着 SDRAM 地址线的容性负载，略差一档是合理的。
+
+因此：**同频档要跑通，取 CPU=TRACECLK=30MHz**；40MHz 以上无论同频还是分频都不可解。
+这是"极限频率探索"的直接结论，不是配置错误。
+
+## 6. 连续记录：CDC 初始化 → 枚举 → `hello world!\n` 回显
+
+`captures/h743/full30/`（CPU=TRACECLK=30MHz，500MSa/s × **2.0s** = 10 亿点，
+一次性连续采集，无拼接）：
+
+1. 复位并用 FPB 断点停在 `trace_hook_entry`（`0x08000B48`，就在 `cdc_acm_init()` 之前）；
+2. 配置 trace 引脚 + ETM/ETF/TPIU，保存快照；
+3. 武装 LA（`--time 2.0`，数据跳变触发），放行 CPU；
+4. 主机侧轮询 CDC 口，一能打开就写 `hello world!\n`（实测 **590ms**，回读 `hello world!\n`）；
+5. 收 CSV + `.kvdat` + 匹配 ELF，并从 LA buffer 分段导出解码。
+
+同一份记录里还留了 `capture.kvdat`（完整 2s 原始波形，可在 KingstVIS 直接打开）
+与 `span-*/`（按窗口导出的可解码片段）。
+
+## 7. 复现命令
+
+```powershell
+# 1) 构建 + 烧录（同频档示例：CPU=TRACECLK=30MHz）
+cd E:\web-etm-trace\firmware\stm32h743_cdc_trace
+pwsh -NoProfile -File .\build.ps1 -CoreMHz 30 -Gcc <arm-none-eabi-gcc>
+cd E:\web-etm-trace; pwsh -NoProfile -File tmp\h743-flash.ps1
+
+# 2) 读硬件事实
+python -X utf8 tools\h743_etm.py info
+
+# 3) 短窗采集 + 解码（稳态）
+python -X utf8 tools\h743_etm.py capture --record captures\h743\sf30 `
+    --time 0.002 --rate 500000000 --overwrite --decode
+
+# 4) 完整流程（长窗、触发对齐、注入回显）
+python -X utf8 tools\h743_etm.py capture --record captures\h743\full30 `
+    --at-entry trace_hook_entry --trigger "--reset --neg-edge 1" `
+    --time 2.0 --rate 500000000 --echo --export-span 0 0.010 --overwrite
+python -X utf8 tools\h743_etm.py decode --record captures\h743\full30
+python -X utf8 tools\h743_etm.py span --record captures\h743\full30 --start 0.590 --end 0.600
+```
+
+## 8. 未完成 / 待办
+
+- **触发对齐偏晚**：`full30` 的 t=0 已落在 `main` 主循环里，`cdc_acm_init` 那段没进窗
+  （初始化本身在记录里，但不在导出的解码窗内）。下次改成"先在 `trace_hook_entry` 稳住、
+  由固件在入口给一个可触发信号"或先放行再武装 LA 的长窗。
+- **同频流是稀疏流**：解码完整度低于密集流；长窗只能分段看（解码器有 200 万条事件上限，
+  480MHz CPU 下 2ms 就有 24 万条指令、`decoded.json` 116MB）。
+- **固件对未知行仍回 `ERR UNKNOWN`**：`hello world!\n` 回显后会紧跟一条，演示时可去掉
+  （`echo_enable` 时不再附应答）。
+- **未回灌到页面**：`web/app/target.js` 里 H743 仍是 `traceValidated=false`；
+  主工具箱 `#tab-etm` 也还没接这套 H743 支持。
+- 板子当前恢复到 **CPU 480MHz / TRACECLK 30MHz**（`-TraceR 16`）——这是目前解码质量最好的一档。
