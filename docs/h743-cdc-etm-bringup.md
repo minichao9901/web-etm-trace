@@ -193,6 +193,53 @@ CPU=120/trace=30 这一档把 USB 栈整条拉了出来：
 
 这是目前**保真度最高的一次"初始化→枚举→回显"记录**（同一次连续采集，按窗口解码）。
 
+### 5.3.1 带宽利用率与"会不会丢信息"（含 ETF 4KB 缓冲）
+
+**端口容量**：4 位 DDR、TRACECLK=30MHz → `30e6 × 4bit × 2 = 30 MB/s`。
+**ETM 产出率 ∝ CPU**，实测（ETM 字节数 ÷ 窗口时长）：
+
+| 配置 | ETM 字节 | 窗口 | ETM 率 | **端口利用率** | 指令 | 异常包（OVERFLOW/BAD_SEQ/RESERVED） |
+|---|---:|---:|---:|---:|---:|---|
+| CPU480 / trace30 | 16,368 | 2ms | 8.18 MB/s | **27.3%** | 238,311 | 0 / 0 / 0 |
+| CPU120 / trace30 | 12,247 | 5ms | 2.45 MB/s | 8.2% | 68,403 | 1 / 18 / 20 |
+| CPU60 / trace30 | 6,390 | 5ms | 1.28 MB/s | 4.3% | 33,848 | 0 / 0 / 10 |
+| CPU30 / trace30 | 2,867 | 5ms | 0.57 MB/s | 1.9% | 12,462 | 0 / 0 / 0（该窗未计入） |
+
+- 线性外推**饱和点 ≈ 1.76 GHz**；H743 上限 480MHz → **最大档仍有 3.7 倍余量**。
+- `unprocessedBytes / unaccountedBytes / overlapBytes` 在全部记录里都是 **0** → 抽取阶段一个 ETM 字节没丢。
+- 注意异常包的方向：**越低频反而越脏**（RESERVED/BAD_SEQUENCE 是字节流错位的征兆），
+  CPU 最高的 480MHz 那份**零异常**。所以"CPU 高了 trace 跟不上"在 H743 范围内**没有证据**；
+  真正的薄弱点是**稀疏流下的解复用对齐**（工具侧）。
+
+**ETF 4KB 缓冲（用户问的"密集短循环缓冲"）**
+
+H7 的 trace 通路是 `ETM → CSTF funnel → ETF → TPIU`。实测 ETF 的 `RSZ(0x004) = 0x400`
+→ 1024 个 32 位字 = **4KB**。RM0433 §60.5.5 原文三种模式，其中：
+
+> **Hardware FIFO mode**：The trace memory is used as a FIFO that is drained through the ATB master
+> interface. Trace data is captured into the trace RAM and **when full, the incoming trace stream is
+> stalled**. When the Trace buffer is not empty, trace data is drained out through the ATB master
+> interface to the TPIU.
+
+即：**4KB 就是突发缓冲** —— 上游瞬间超过端口能力时先灌进 RAM，空了再排空；只有灌满才 stall/溢出。
+另外它天然承担 **时钟域隔离**（ATB 跑 CPU 时钟，TPIU 跑 TRACECLK，两者不同源）。
+
+能扛多久（按 480MHz 的 8.18MB/s 基线外推，端口 30MB/s）：
+
+| 瞬时突发倍率 | 突发率 | 净灌入速率 | 4KB 可撑 |
+|---:|---:|---:|---:|
+| 4× | 32.7 MB/s | 2.7 MB/s | ≈1.5 ms |
+| 10× | 81.8 MB/s | 51.8 MB/s | ≈79 µs |
+| 100× | 818 MB/s | 788 MB/s | ≈5 µs |
+
+⇒ **毫秒/几十微秒级的稠密短循环会被 4KB 吸收**，秒级持续超载不可能（那时必须提 TRACECLK）。
+
+**为什么不用 Circular Buffer 模式**：那档是"存进 4KB 回头再读"，480MHz 下 4KB 仅 ≈0.5ms trace，
+对"一气呵成的初始化→枚举→回显"（数百 ms）没用；所以本项目固定用**直通排空**（下游接 TPIU + LA）。
+
+**一条实用副作用**：CoreSight 调试/trace 组件**不被系统复位复位**——烧录后实测 `ETF CTL(0x020)`
+仍读回 1（上次采集留下的）。所以每次采集前必须重新配置（`h743_etm.py` 的 `configure_trace()` 会全量重配并保存快照）。
+
 ### 5.4 口径修正：trace 与 CPU 的比例（同频 vs CPU/2）
 
 之前把"1/2"理解反了（试成了 trace=CPU/2=15MHz，那档确实解不出：TRACECLK 有 1 万多个异常半周期）。
