@@ -51,3 +51,64 @@ foreach ($v in @(@{n='cpu30-trace30';core=30;r=4}, @{n='cpu60-trace30';core=60;r
 
 > 注意：`build.ps1` 每次都会覆盖 `build/fw.*` 和目录根的 `fw.elf/fw.bin/fw.hex`（不带档位后缀的那些）。
 > 带后缀的 `fw-cpuNN-traceNN.*` 是本表这四份，手改 `build.ps1` 时别把它们清掉。
+
+## ⚠️ 变体必须与源码同步（2026-10-17 真机踩到）
+
+**症状**：网页里载入变体 ELF 后，底部报红字
+
+```
+目标机器码与 ELF 不匹配：0x08000298
+```
+
+**原因**：变体 ELF 是**某个时刻的源码快照**。源码一改（哪怕只改一行 C），代码会整体挪位，
+变体就与板子里的固件对不上——网页会逐字节比对 ELF 与目标 Flash，地址错位即报错。
+本次就是这样：变体是 13:42 打的，而板子里烧的是 17:34 的 `build/fw.elf`（源码在那之后修过），
+两者符号地址差 8 字节：
+
+| 符号 | 板子里（`build/fw.elf` 17:34） | 旧变体（13:42） |
+|---|---|---|
+| `_init` | 0x08000AB6 | 0x08000AAE |
+| `cdc_acm_init` | 0x08000818 | 0x08000828 |
+| `trace_hook_entry` | **0x08000B50** | 0x08000B48 |
+
+**怎么快速判断**（一条命令）：
+
+```powershell
+arm-none-eabi-nm build\fw.elf | Select-String ' T trace_hook_entry$'
+arm-none-eabi-nm fw-cpu60-trace30.elf | Select-String ' T trace_hook_entry$'
+```
+
+两个地址不一致 ⇒ 变体过期，必须重建。
+
+**重建（只编译、不烧录；约 4×15 秒）**：
+
+```powershell
+cd E:\web-etm-trace\firmware\stm32h743_cdc_trace
+$gcc='E:/Share/env-windows/tools/gnu_gcc/arm_gcc/mingw/bin/arm-none-eabi-gcc.exe'
+foreach($c in @(@(30,4),@(60,8),@(90,12),@(120,16))){
+  & pwsh -NoProfile -File .\build.ps1 -CoreMHz $c[0] -TraceR $c[1] -Gcc $gcc
+  Copy-Item build\fw.elf "fw-cpu$($c[0])-trace30.elf" -Force
+  Copy-Item build\fw.bin "fw-cpu$($c[0])-trace30.bin" -Force
+  Copy-Item build\fw.hex "fw-cpu$($c[0])-trace30.hex" -Force
+}
+```
+
+> 固件**没有**嵌 `__DATE__`/`__TIME__`，所以同参数重建是**逐字节可复现**的：
+> 重建出来的 `fw-cpu60-trace30.elf` 与板子里的 `build/fw.elf` sha256 完全相同（`C610192CE4ACBEFC…`）。
+> 万一你只是要跑一次采集，**直接载 `build\fw.elf`** 最稳——它就是刚烧进去的那份。
+
+### 本轮重建后的哈希（2026-10-17 20:30，源码 `aa3af67`）
+
+| 文件 | CPU / TRACECLK | 字节 | sha256（前 16 位） |
+|---|---|---|---:|
+| `fw-cpu30-trace30.elf` | 30 / 30 MHz | 2,178,084 | `D4D1F17BBF0A0B84` |
+| `fw-cpu60-trace30.elf` | 60 / 30 MHz | 2,178,084 | `C610192CE4ACBEFC` ← **与已烧固件相同** |
+| `fw-cpu90-trace30.elf` | 90 / 30 MHz | 2,178,084 | `F81401AAA291DBA1` |
+| `fw-cpu120-trace30.elf` | 120 / 30 MHz | 2,178,084 | `051C42F4EA925DD3` |
+
+四份的 `trace_hook_entry` 都在 **0x08000B50**（代码布局相同，只有 PLL 常数不同），
+所以除 `cpu60` 外，其余三份要**先烧对应固件**再用，否则同样会报不匹配。
+
+另外记一条：本次重建时我误用了 `-TraceR 16` 给 cpu30，得到的其实是 **TRACECLK 7.5 MHz**；
+正确的 cpu30 是 `-TraceR 4`（`4f/30 = 4`）。**CPU 越低，R 越小**，别按"高频档的表"照抄。
+
