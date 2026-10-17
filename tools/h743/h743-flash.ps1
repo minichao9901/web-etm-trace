@@ -9,6 +9,9 @@ $a = @('-s', $scr, '-f', 'interface/cmsis-dap.cfg', '-c', 'transport select swd'
        '-c', 'init', '-c', 'halt',
        '-c', 'mww 0xE000ED0C 0x05FA0004', '-c', 'sleep 300', '-c', 'halt',
        '-c', 'mww 0xE000E010 0')
+# 送进 OpenOCD 的 -c "..." 是 Tcl 字符串：反斜杠会被当转义吃掉（\f=换页、\b=退格、\t=制表），
+# 曾导致 flash write_image 打不开 E:\web-etm-trace\... 一律换成正斜杠。
+$Elf = $Elf -replace '\\', '/'
 for ($i = 0; $i -lt 8; $i++) { $a += @('-c', ('mww 0x{0:X} 0xFFFFFFFF' -f (0xE000E180 + $i * 4))) }
 $a += @('-c', "flash write_image erase `"$Elf`"",
         '-c', "verify_image `"$Elf`"",

@@ -494,7 +494,8 @@ def cmd_decode(args):
         return result
     from decode_trace import decode_capture
     result = decode_capture(record / 'capture.csv', record / 'firmware.elf', record,
-                            config=config, fraction=args.fraction)
+                            config=config, fraction=args.fraction,
+                            glitch_ns=getattr(args, 'filter_ns', 0.0))
     print(json.dumps(result['summary'], indent=2, ensure_ascii=False))
     print(json.dumps(result['status'], ensure_ascii=False))
     print('framing:', json.dumps({k: v for k, v in result['framing'].items()
@@ -521,7 +522,8 @@ def cmd_span(args):
     work = record / f'span-{tag}'
     config = {k: int(v) for k, v in meta['etm'].items()}
     result = decode_capture(out, record / 'firmware.elf', work, config=config,
-                            fraction=args.fraction)
+                            fraction=args.fraction,
+                            glitch_ns=getattr(args, 'filter_ns', 0.0))
     (work / 'execution.c').write_text(export_source(result), encoding='utf-8')
     (work / 'simplified.c').write_text(export_source(result, True), encoding='utf-8')
     print(json.dumps(result['summary'], indent=2, ensure_ascii=False))
@@ -548,6 +550,8 @@ def main():
     a.add_argument('--rate', type=int, default=500000000)
     a.add_argument('--traceid', type=int, default=2)
     a.add_argument('--fraction', type=float, default=0.25)
+    a.add_argument('--filter-ns', type=float, default=0.0,
+                   help='解码前软件滤波（ns，0=关闭；有窄脉冲的记录建议 4')
     a.add_argument('--at-entry', default=None, help='复位后停在该 ELF 符号再配 ETM')
     a.add_argument('--trigger', default=None,
                    help='整串传给 LA 的 --trigger，例如 "--reset --neg-edge 1"')
@@ -564,6 +568,8 @@ def main():
     a = sub.add_parser('decode')
     a.add_argument('--record', required=True)
     a.add_argument('--fraction', type=float, default=0.25)
+    a.add_argument('--filter-ns', type=float, default=0.0,
+                   help='解码前软件滤波（ns，0=关闭；有窄脉冲的记录建议 4')
     a.add_argument('--stream', action='store_true',
                    help='流式展开并分页；CSV/ELF/调用树仍占内存，同时导出简化 C')
     a.add_argument('--max-events', type=int, default=0, help='流式模式下的可选上限，0=无上限')
@@ -574,6 +580,8 @@ def main():
     a.add_argument('--start', type=float, required=True)
     a.add_argument('--end', type=float, required=True)
     a.add_argument('--fraction', type=float, default=0.25)
+    a.add_argument('--filter-ns', type=float, default=0.0,
+                   help='解码前软件滤波（ns，0=关闭；有窄脉冲的记录建议 4')
     a.set_defaults(func=cmd_span)
     args = p.parse_args()
     args.func(args)
