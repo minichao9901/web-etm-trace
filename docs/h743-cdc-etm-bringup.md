@@ -160,6 +160,39 @@ CPU 480MHz / TRACECLK 30MHz（`-TraceR 16`），500MSa/s、2ms、取样相位 0.
 因此：**同频档要跑通，取 CPU=TRACECLK=30MHz**；40MHz 以上无论同频还是分频都不可解。
 这是"极限频率探索"的直接结论，不是配置错误。
 
+### 5.2 更优解：TRACECLK 钉在 30MHz，把 CPU 拉高（不同频）
+
+同频并不是必须的。既然物理上限在 TRACECLK 一侧，正确做法是**把 TRACECLK 钉在 30MHz，
+让 CPU 尽量高**——端口利用率随 CPU 线性上升，解码到的真实执行面随之变宽。
+同一 5ms 窗、同一 500MSa/s：
+
+| 配置 | 指令 | 执行 | 指令范围 | 缺口 | 包问题 | 函数数 | USB/CDC 函数 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| CPU=trace=30MHz | 12,462 | 10,596 | 2,497 | 3 | 8 | 3 | 无 |
+| CPU=60 / trace=30MHz | 33,848 | 28,779 | 6,783 | 6 | 10 | 5 | `usb_memcpy` |
+| **CPU=120 / trace=30MHz** | **68,403** | 58,259 | 13,571 | 8 | 39 | **21** | **13 个** |
+| CPU=480 / trace=30MHz（2ms） | 238,311 | 202,568 | 47,666 | 1 | 0 | 3 | 无（窗落在稳态主循环） |
+
+CPU=120/trace=30 这一档把 USB 栈整条拉了出来：
+`cdc_acm_init` · `usbd_event_handler` · `usbd_cdc_acm_bulk_out/in` · `cdc_write` · `cdc_puts` ·
+`handle_command` · 四个描述符回调 · `usb_memcpy`。
+
+构建方式：`build.ps1 -CoreMHz 120 -TraceR 16`（VCO=960、P=8、R=16 → CPU=120MHz、TRACECLK=30MHz）。
+**推荐口径：TRACECLK = 30MHz（物理上限内），CPU ≥ 120MHz；只有确实要"同频"时才取 30/30。**
+
+### 5.3 完整流程用 CPU=120 / trace=30 重抓
+
+`captures/h743/full120/`（500MSa/s × 2.0s 连续采集，回显注入 579ms，回读 `hello world!\n`）：
+
+- 初始化窗 `[0, 12ms]`：**130,599 条指令 / 15 个函数** —— `_DoInit`（C 运行时初始化）、
+  `OTG_FS_IRQHandler` / `USBD_IRQHandler` / `dwc2_get_glb_intstatus`（USB 中断）、
+  `usb_memcpy`、`cdc_puts` / `handle_command`（banner）、`trace_log_printf` / `SEGGER_RTT_Write`。
+- 回显窗 `[0.5365, 0.5445]`：255,408 条指令，含 `usbd_cdc_acm_set_dtr` /
+  `usbd_cdc_acm_set_rts`（主机开端口）→ `cdc_puts`（banner）→ `handle_command`（处理
+  `hello world!\n`）→ `trace_log_printf`（`[cdc] rx` 日志）→ `trace_hook_mark`。
+
+这是目前**保真度最高的一次"初始化→枚举→回显"记录**（同一次连续采集，按窗口解码）。
+
 ## 6. 连续记录：CDC 初始化 → 枚举 → `hello world!\n` 回显
 
 `captures/h743/full30/`（CPU=TRACECLK=30MHz，500MSa/s × **2.0s** = 10 亿点，

@@ -8,7 +8,7 @@
 # 产物：build\fw.elf / fw.bin / fw.hex，并在根目录放一份副本。
 # 只编译，不烧录；固件**不配置 ETM**，trace 由外部 SWD 工具配置。
 param(
-    [ValidateSet('480', '100', '90', '80', '70', '60', '50', '45', '40', '35', '30', '25')][string]$CoreMHz = '480',
+    [ValidateSet('480', '240', '120', '100', '90', '80', '70', '60', '50', '45', '40', '35', '30', '25')][string]$CoreMHz = '480',
     [ValidateSet(0, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 128)][int]$TraceR = 0,
     [ValidateSet('External', 'Internal')][string]$UsbSupply = 'External',
     [string]$Gcc
