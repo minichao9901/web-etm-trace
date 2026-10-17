@@ -18,7 +18,7 @@ def demux(raw):
     streams = {}
     stats = dict(frames=0, fsyncs=0, hsyncs=0, errors=0, unknown_bytes=0,
                  initial_skipped_bytes=skipped, id_changes=[], trailing_sync_bytes=0,
-                 idle_resyncs=0, dropped_partial_frame_bytes=0)
+                 idle_resyncs=0, dropped_partial_frame_bytes=0, mid_frame_fsyncs=0)
 
     def emit(source, value):
         if source is None:
@@ -36,8 +36,15 @@ def demux(raw):
             break
         if position + 2 > len(raw):
             break
-        if not frame and raw[position:position + 4] == FSYNC:
+        if raw[position:position + 4] == FSYNC:
+            # FSYNC 允许出现在**帧中间**：格式化器在半帧处转入 idle 时就是这样发的
+            # （CPU==TRACECLK 时端口 98% 时间空闲，必然频繁出现）。
+            # 格式化器保证数据字节恒为偶数（LSB 用于区分控制字节），所以
+            # FF FF FF 7F 不可能是数据 —— 跳过 4 字节（偶数长度，不破坏帧内配对）
+            # 继续收集本帧，既不丢数据也不打乱字节相位。
             stats['fsyncs'] += 1
+            if frame:
+                stats['mid_frame_fsyncs'] += 1
             position += 4
             continue
         pair = raw[position:position + 2]
