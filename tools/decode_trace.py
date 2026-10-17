@@ -132,7 +132,7 @@ class Image:
         return ''
 
 
-def decode(id_stream, elf, workdir, config=None, sources=None):
+def decode(id_stream, elf, workdir, config=None, sources=None, max_events=None):
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     config = decoder_config(config)
@@ -186,8 +186,8 @@ def decode(id_stream, elf, workdir, config=None, sources=None):
                 events.append(event)
                 if executed:
                     counts[function or '(未知函数)'] += 1
-                if len(events) > 2000000:
-                    raise ValueError('记录超过初版 200 万条展开上限，请缩短采集窗；未输出截断结果。')
+                if max_events and len(events) > max_events:
+                    raise ValueError(f'已超过 --max-events={max_events}；默认没有上限。')
         elif element['type'] in (1, 2, 3, 6, 7, 8, 9, 10):
             event = dict(kind='event', seq=len(events), type=element['type'],
                          offset=element['offset'], text=element['text'], payload=element['payload'],

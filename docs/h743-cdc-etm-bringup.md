@@ -285,6 +285,55 @@ python -X utf8 server.py --port 8766          # 本地服务
 - `captures/h743-sweep/30mhz/web-page-decode.png` —— 页面截图（记录名 / 12,470 条 /
   函数轨迹 `main 10,576 · HAL_IncTick 14 · SysTick_Handler 6` / 执行流表逐条 `PC + 机器码 + main.c:464,469`）。
 
+## 8.5 去掉解码上限：流式解码（内存 O(1)，可解任意长度）
+
+原 `tools/decode_trace.py` 有一条硬上限：展开事件超过 **2,000,000** 条就报错拒绝
+（不是精度要求，只是当时为了不让内存爆掉）。已删除；新增 `--max-events` 作为**可选**上限（默认无）。
+
+但"只删两行"没用 —— 长采集会先被内存打死：
+
+| 项 | 20ms 窗 | 外推 1s |
+|---|---:|---:|
+| 指令 | 109,848 | ≈5.5M |
+| `decoded.json` | 53.6 MB | ≈2.6 GB |
+
+而且本机**只剩 3GB 可用内存**。所以新增流式通路 `tools/decode_stream.py`：
+
+- 原生解码器 stdout 直接写 `native.jsonl`（原来是 `capture_output` 整段进内存，等于多存一份）；
+- `packets` / `elements` / `events` 一律边读边写 JSONL 临时文件，最后拼成 `decoded.json`；
+- `events` 另存一份**真正的 JSONL**（`events.jsonl`，一行一个对象），供再流式导出简化 C；
+- 反汇编缓存加上限（`CACHE_MAX=8192`），长 trace 不会把内存吃穿；
+- `export_simplified_stream()` 两遍扫 `events.jsonl` 生成简化 C（行规则与网页一致）。
+
+用法：
+
+```powershell
+python -X utf8 tools\h743_etm.py decode --record captures\h743\stream200 --stream
+# 或抓住之后立刻流式解：
+python -X utf8 tools\h743_etm.py capture --record ... --time 0.2 --export-span 0 0.2
+```
+
+**实测（200ms 窗，远超旧上限）**：
+
+| 指标 | 值 |
+|---|---:|
+| 指令 | **2,598,778**（执行 2,274,110） |
+| 指令范围 | 487,470 |
+| ETM 包 | 262,121 |
+| 字节对账 | 275,665 = processed，**unprocessed 0 / 重叠 0 / 未归属 0** |
+| `decoded.json` | 859 MB |
+| `events.jsonl` | 668 MB |
+| `native.jsonl` | 178 MB |
+| 简化 C | **650,444 行** |
+| 内存 | 全程在 3GB 空闲内存内完成 |
+
+记录：`captures/h743/stream200/`。产物 `decoded.json` 头尾结构已校验（合法 JSON），
+`tools/tests` 全套 106 项通过。
+
+⚠️ 仍未改的一处：**网页工具**（`server.py` 的 `result()`）仍旧 `json.load` 整个 `decoded.json`，
+所以 859MB 级别的记录在页面上打不开；页面要用长记录得改成按序号分页读 `events.jsonl`。
+命令行/脚本侧（含导出简化 C）已经可以任意长度。
+
 ## 9. AHB/HCLK 太低 USB 不工作：真因是 TRDT 用错了频率（已修）
 
 "AHB 太低 USB 不工作"这个说法是真的，但**在我们这份固件上主因是 bug，不是硬墙**。

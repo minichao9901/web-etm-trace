@@ -297,11 +297,15 @@ def target_ports(vid=0xF055, pid=0x7431):
     return [p.device for p in list_ports.comports() if p.vid == vid and p.pid == pid]
 
 
-def echo_when_ready(names, text='hello world!\n', budget=8.0):
-    """放行 CPU 之后尽快把 hello world!\\n 写进 CDC 口；返回 (耗时, 端口, 回读)。
+def echo_when_ready(names, text='hello world!\n', budget=8.0, repeat=1, interval=0.005):
+    """放行 CPU 之后把 hello world!\\n 写进 CDC 口；返回 (首次耗时, 端口, 回读, 写入相对时刻表)。
 
     目标会重新枚举：先拿复位前记下的端口名直连（打不开会立刻失败，很快），
     每隔一会儿再扫一次端口列表兜底 —— 只靠 list_ports 轮询会慢几百毫秒。
+
+    repeat > 1 时在同一个已打开的句柄上连续写（DTR 不再抖动、不会重新枚举）：
+    echo 的 CPU 活动只有十几微秒，用毫秒级的时间窗去"扫"它是几乎必定落空的，
+    只有让 echo 密集重复，任意窗里才会正好包住一次。
     """
     import serial
     t0 = time.time()
@@ -320,14 +324,21 @@ def echo_when_ready(names, text='hello world!\n', budget=8.0):
                     sp.dtr = True
                     time.sleep(0.015)
                     sp.reset_input_buffer()
-                    sp.write(text.encode())
-                    time.sleep(0.05)
-                    data = sp.read(512)
-                return time.time() - t0, name, data.decode('utf-8', 'replace')
+                    first_delay, readback, writes = None, '', []
+                    for i in range(max(1, repeat)):
+                        sp.write(text.encode())
+                        writes.append(round(time.time() - t0, 6))
+                        if i == 0:
+                            time.sleep(0.05)
+                            readback = sp.read(512).decode('utf-8', 'replace')
+                            first_delay = time.time() - t0
+                        else:
+                            time.sleep(interval)
+                return first_delay, name, readback, writes
             except Exception as exc:                     # noqa: BLE001
                 last = str(exc)
         time.sleep(0.002)
-    return None, last, ''
+    return None, last, '', []
 
 
 
@@ -426,10 +437,14 @@ def cmd_capture(args):
         run_t0 = time.time()
         print(f'CPU 已放行（{run_t0:.3f}）')
         if args.echo:
-            delay, port, readback = echo_when_ready(known_ports, 'hello world!\n',
-                                                    budget=args.echo_budget)
-            meta['echo'] = {'delay': delay, 'port': port, 'read': readback}
-            print(f'  回显注入 delay={delay} 端口={port} 回读={readback!r}')
+            delay, port, readback, writes = echo_when_ready(
+                known_ports, 'hello world!\n', budget=args.echo_budget,
+                repeat=args.echo_repeat, interval=args.echo_interval)
+            meta['echo'] = {'delay': delay, 'port': port, 'read': readback,
+                            'repeat': args.echo_repeat, 'interval': args.echo_interval,
+                            'writes': writes}
+            print(f'  回显注入 delay={delay} 端口={port} 回读={readback!r} '
+                  f'连续写 {len(writes)} 次，间隔 {args.echo_interval}s')
         out = proc.communicate(timeout=args.time + 180)[0]
         print(out.strip().splitlines()[-1] if out.strip() else '')
         print(f'LA 退出码 {proc.returncode}')
@@ -462,10 +477,22 @@ def cmd_restore(args):
 
 
 def cmd_decode(args):
-    from decode_trace import decode_capture
     record = Path(args.record).resolve()
     meta = json.loads((record / 'meta.json').read_text(encoding='utf-8'))
     config = {k: int(v) for k, v in meta['etm'].items()}
+    if getattr(args, 'stream', False):
+        from decode_stream import decode_capture_stream, export_simplified_stream
+        result = decode_capture_stream(record / 'capture.csv', record / 'firmware.elf',
+                                       record, config=config, fraction=args.fraction,
+                                       max_events=args.max_events or None)
+        rows = export_simplified_stream(record, record / 'etm-simplified.c')
+        print(json.dumps(result['summary'], indent=2, ensure_ascii=False))
+        print('framing:', json.dumps({k: v for k, v in result['framing'].items()
+                                     if k in ('phase', 'frames')}, ensure_ascii=False))
+        print('quality:', json.dumps(result['quality'], ensure_ascii=False))
+        print(f'流式产物：decoded.json / events.jsonl / sources.json；简化 C {rows} 行')
+        return result
+    from decode_trace import decode_capture
     result = decode_capture(record / 'capture.csv', record / 'firmware.elf', record,
                             config=config, fraction=args.fraction)
     print(json.dumps(result['summary'], indent=2, ensure_ascii=False))
@@ -526,12 +553,18 @@ def main():
                    help='只导出这段窗口（秒，从采样起点算）；长采集必须给，否则 CSV 会是 GB 级')
     a.add_argument('--echo', action='store_true', help='放行后往 CDC 口写 hello world!\\n')
     a.add_argument('--echo-budget', type=float, default=8.0)
+    a.add_argument('--echo-repeat', type=int, default=1,
+                   help='连续写多少次（echo 的 CPU 活动只有十几微秒，要扫到必须密集重复）')
+    a.add_argument('--echo-interval', type=float, default=0.005, help='重复写的间隔（秒）')
     a.add_argument('--overwrite', action='store_true')
     a.add_argument('--decode', action='store_true')
     a.set_defaults(func=cmd_capture)
     a = sub.add_parser('decode')
     a.add_argument('--record', required=True)
     a.add_argument('--fraction', type=float, default=0.25)
+    a.add_argument('--stream', action='store_true',
+                   help='流式解码：内存 O(1)，可解任意长度（整段秒级），同时导出简化 C')
+    a.add_argument('--max-events', type=int, default=0, help='流式模式下的可选上限，0=无上限')
     a.set_defaults(func=cmd_decode)
     a = sub.add_parser('span')
     a.add_argument('--record', required=True)
