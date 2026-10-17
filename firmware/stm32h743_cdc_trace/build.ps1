@@ -137,10 +137,16 @@ $r = Invoke-Tool -Exe $Gcc -Args (@($h7Flags) + @($h7Objects) + @("-T$h7Root\ld\
     "-Wl,-Map=$h7Build\fw.map", '-o', $h7Elf))
 if ($r.ExitCode -ne 0) { throw '链接失败' }
 
-foreach ($h7Fmt in @(@('binary', 'bin'), @('ihex', 'hex'))) {
-    $r = Invoke-Tool -Exe "$h7Bin\arm-none-eabi-objcopy.exe" -Args @('-O', $h7Fmt[0], $h7Elf, "$h7Build\fw.$($h7Fmt[1])")
-    if ($r.ExitCode -ne 0) { throw '转换失败' }
-}
+# 先出稠密 .bin
+$r = Invoke-Tool -Exe "$h7Bin\arm-none-eabi-objcopy.exe" -Args @('-O', 'binary', $h7Elf, "$h7Build\fw.bin")
+if ($r.ExitCode -ne 0) { throw '转换 .bin 失败' }
+# 🚨 .hex 必须由**稠密 .bin** 生成，不能直接 `-O ihex fw.elf`：
+#    objcopy 2.36 的 ihex 输出会省掉整段 0x00（实测 0x08000298..0x29F 这 8 字节没有记录），
+#    烧 hex 的人会得到"这 8 字节保持 0xFF"，网页逐字节比对 ELF 就报
+#    「目标机器码与 ELF 不匹配：0x08000298（ELF 00 ≠ 目标 ff）」。见 VARIANTS.md。
+$r = Invoke-Tool -Exe "$h7Bin\arm-none-eabi-objcopy.exe" -Args @('-I', 'binary', '-O', 'ihex',
+    '--change-addresses', '0x08000000', "$h7Build\fw.bin", "$h7Build\fw.hex")
+if ($r.ExitCode -ne 0) { throw '转换 .hex 失败' }
 
 Write-Output (Invoke-Tool -Exe "$h7Bin\arm-none-eabi-size.exe" -Args @($h7Elf)).Stdout
 (Invoke-Tool -Exe "$h7Bin\arm-none-eabi-nm.exe" -Args @('-n', '-S', $h7Elf)).Stdout | Set-Content -LiteralPath "$h7Build\fw.symbols.txt" -Encoding utf8
