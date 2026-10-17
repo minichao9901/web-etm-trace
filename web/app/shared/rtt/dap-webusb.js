@@ -73,21 +73,35 @@ export async function withTimeout(p, ms, what){
   try { return await Promise.race([p, timeout]); } finally { clearTimeout(t); }
 }
 
-/** USB 端口复位（清挂起传输）；成功返回 true */
+/**
+ * USB 端口复位（清挂起传输）；**永不抛异常**，成功返回 true。
+ *
+ * 2026-10 真机定因：`USBDevice.reset()` 在这颗复合探针上（Windows）经常直接失败，
+ * 报 `Failed to execute 'reset' on 'USBDevice': Unable to reset the device`。
+ * 参考实现 pyOCD 打开探针时**根本不 reset**，只做 claim_interface
+ * （pyocd/probe/pydapaccess/interface/pyusb_backend.py:126-130）；
+ * 我们只把 reset 当作"上次会话遗留挂起传输"的**尽力清理**：
+ *   · 失败绝不能打断打开/认领流程（原来 lease 分支没有 try/catch，
+ *     异常一路抛到 _claim()，页面于是停在"已连接但无通信"——就是这个 bug）；
+ *   · 失败只留一条可读警告，后面照常 claim。
+ * 目标板没接 NRST 时尤其重要：这里绝不能要求"拔插一次"才能继续。
+ */
 async function resetDevice(device, lease){
-  if (lease){
-    await lease.reset();
-    dirty.delete(device);
-    return true;
-  }
-  if (!device || !device.opened) return false;
   try {
+    if (lease){
+      await withTimeout(lease.reset(), 3000, 'USB 端口复位');
+      dirty.delete(device);
+      return true;
+    }
+    if (!device || !device.opened) return false;
     await withTimeout(device.reset(), 3000, 'USB 端口复位');
     dirty.delete(device);
     console.info('[dap] 已做 USB 端口复位（清掉上一次会话的挂起传输）');
     return true;
   } catch (e){
-    console.warn(`[dap] USB 端口复位失败：${e.message}（可能要拔插一次探针）`);
+    // 只警告，不抛：复位只是尽力而为，认领能否成功由 claim 决定。
+    console.warn(`[dap] USB 端口复位失败（非致命，继续认领）：${e.message}`);
+    dirty.delete(device);
     return false;
   }
 }
@@ -236,9 +250,10 @@ export class WebUsbDapProbe {
     //    getDevices()/open() 整条卡死。先做端口复位清掉（在 open 之前做最安全）。
     if (dirty.has(d)){
       console.warn('[dap] 这个探针上次有超时（挂起传输），先复位 USB 端口再认领');
-      this._note('上次会话有超时（可能还挂着传输）→ 先复位 USB 端口再认领');
+      this._note('上次会话有超时（可能还挂着传输）→ 先尝试复位 USB 端口再认领');
       await this._usb.open();
-      await resetDevice(d, this._usb);
+      if (!await resetDevice(d, this._usb))
+        this._note('USB 端口复位不可用（这颗探针常见）→ 跳过，直接认领接口');
     }
     await this._usb.open();
     let found = null;
@@ -275,7 +290,7 @@ export class WebUsbDapProbe {
       let ok = false, lastMsg = e.message;
       for (let i = 1; i <= 3 && !ok; i++){
         this._note(`认领接口失败（${lastMsg}）→ 复位端口后第 ${i}/3 次重试…`);
-        await resetDevice(d, this._usb);
+        await resetDevice(d, this._usb);   // 失败也只是警告，不打断重试
         await sleep(300 * i);
         try { await withTimeout(this._usb.claim(this.iface, [this.epIn | 0x80, this.epOut]), 5000, 'USB 认领接口（重试）'); ok = true; }
         catch (e2){ lastMsg = e2.message; }
